@@ -1,0 +1,435 @@
+openapi: 3.1.0
+info:
+  title: BTC Price Tick API
+  description: |
+    Real-time Bitcoin price oracle service for prediction market settlement.
+    Aggregates prices from Binance, Coinbase, and Kraken using multi-venue median pricing.
+  version: 1.0.0
+  contact:
+    name: Price Oracle Team
+
+servers:
+  - url: http://localhost:8080
+    description: Development
+  - url: https://price-oracle.example.com
+    description: Production
+
+tags:
+  - name: Price
+    description: Price data endpoints
+  - name: Health
+    description: System health endpoints
+
+paths:
+  /v1/price/latest:
+    get:
+      tags: [Price]
+      summary: Get current canonical price
+      description: Returns the latest canonical BTC/USD price from memory (lowest latency)
+      operationId: getLatestPrice
+      responses:
+        '200':
+          description: Current price
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatestPrice'
+        '503':
+          description: No data available yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/price/settlement:
+    get:
+      tags: [Price]
+      summary: Get settlement price
+      description: |
+        Returns the official settlement price at a specific 5-minute boundary.
+        **Primary endpoint for prediction market resolution.**
+      operationId: getSettlementPrice
+      parameters:
+        - name: ts
+          in: query
+          required: true
+          description: Settlement timestamp (RFC3339). Must be on a 5-minute boundary.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-03-19T09:10:00Z"
+      responses:
+        '200':
+          description: Settlement price
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettlementPrice'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missingTs:
+                  value: { "error": "ts parameter required (RFC3339 format)" }
+                invalidBoundary:
+                  value: { "error": "ts must be on a 5-minute boundary" }
+                futureTs:
+                  value: { "error": "ts cannot be in the future" }
+        '404':
+          description: No data for timestamp
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '425':
+          description: Price not yet finalized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/price/snapshots:
+    get:
+      tags: [Price]
+      summary: Query historical snapshots
+      description: Returns 1-second snapshots in a time range
+      operationId: getSnapshots
+      parameters:
+        - name: start
+          in: query
+          required: true
+          description: Start time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: false
+          description: End time (RFC3339), defaults to now
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: List of snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Snapshot'
+
+  /v1/price/ticks:
+    get:
+      tags: [Price]
+      summary: Query recent price ticks
+      description: Returns recent canonical price change events
+      operationId: getTicks
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Number of ticks to return
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        '200':
+          description: List of ticks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tick'
+
+  /v1/price/raw:
+    get:
+      tags: [Price]
+      summary: Query raw exchange data
+      description: Returns raw tick data from individual exchanges (for auditing)
+      operationId: getRawTicks
+      parameters:
+        - name: source
+          in: query
+          required: false
+          description: Filter by source
+          schema:
+            type: string
+            enum: [binance, coinbase, kraken]
+        - name: start
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: List of raw events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RawEvent'
+
+  /v1/health:
+    get:
+      tags: [Health]
+      summary: System health check
+      operationId: getHealth
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /v1/health/feeds:
+    get:
+      tags: [Health]
+      summary: Per-source feed health
+      operationId: getFeedHealth
+      responses:
+        '200':
+          description: Feed health status
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FeedHealth'
+
+components:
+  schemas:
+    LatestPrice:
+      type: object
+      required: [symbol, ts, price, basis, source_count]
+      properties:
+        symbol:
+          type: string
+          example: "BTC/USD"
+        ts:
+          type: string
+          format: date-time
+          description: Timestamp of the price event
+        price:
+          type: string
+          description: Canonical price (decimal string)
+          example: "70105.45"
+        basis:
+          type: string
+          enum: [median_trade, median_mixed, single_trade, single_midpoint, carry_forward]
+          description: How the price was computed
+        is_stale:
+          type: boolean
+          description: True if data is outdated
+        is_degraded:
+          type: boolean
+          description: True if fewer than minimum sources
+        quality_score:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Data quality metric
+        source_count:
+          type: integer
+          description: Number of sources used
+        sources_used:
+          type: array
+          items:
+            type: string
+          example: ["binance", "coinbase", "kraken"]
+
+    SettlementPrice:
+      type: object
+      required: [settlement_ts, symbol, price, status, basis]
+      properties:
+        settlement_ts:
+          type: string
+          format: date-time
+          description: The settlement timestamp (5-minute boundary)
+        symbol:
+          type: string
+          example: "BTC/USD"
+        price:
+          type: string
+          description: Official settlement price
+          example: "70105.45"
+        status:
+          type: string
+          enum: [confirmed, degraded, stale]
+          description: |
+            - confirmed: High quality, safe for auto-settlement
+            - degraded: Fewer sources, use with caution
+            - stale: No fresh data, manual review recommended
+        basis:
+          type: string
+          enum: [median_trade, median_mixed, single_trade, single_midpoint, carry_forward]
+        quality_score:
+          type: number
+          format: float
+        source_count:
+          type: integer
+        sources_used:
+          type: array
+          items:
+            type: string
+        finalized_at:
+          type: string
+          format: date-time
+          description: When the snapshot was finalized
+        source_details:
+          type: string
+          format: byte
+          description: Base64-encoded JSON with per-source details (for audit)
+
+    Snapshot:
+      type: object
+      properties:
+        ts_second:
+          type: string
+          format: date-time
+        symbol:
+          type: string
+        price:
+          type: string
+        basis:
+          type: string
+        is_stale:
+          type: boolean
+        is_degraded:
+          type: boolean
+        quality_score:
+          type: number
+        source_count:
+          type: integer
+        sources_used:
+          type: array
+          items:
+            type: string
+        finalized_at:
+          type: string
+          format: date-time
+
+    Tick:
+      type: object
+      properties:
+        ts:
+          type: string
+          format: date-time
+        symbol:
+          type: string
+        price:
+          type: string
+        basis:
+          type: string
+        is_stale:
+          type: boolean
+        is_degraded:
+          type: boolean
+        quality_score:
+          type: number
+        source_count:
+          type: integer
+        sources_used:
+          type: array
+          items:
+            type: string
+
+    RawEvent:
+      type: object
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        source:
+          type: string
+          enum: [binance, coinbase, kraken]
+        event_type:
+          type: string
+          enum: [trade, ticker]
+        exchange_ts:
+          type: string
+          format: date-time
+        recv_ts:
+          type: string
+          format: date-time
+        price:
+          type: string
+        size:
+          type: string
+        side:
+          type: string
+          enum: [buy, sell]
+        trade_id:
+          type: string
+
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, stale, no_data]
+        timestamp:
+          type: string
+          format: date-time
+        latest_price:
+          type: string
+        latest_ts:
+          type: string
+          format: date-time
+        source_count:
+          type: integer
+
+    FeedHealth:
+      type: object
+      properties:
+        source:
+          type: string
+        conn_state:
+          type: string
+          enum: [connected, connecting, disconnected]
+        last_message_ts:
+          type: string
+          format: date-time
+        last_trade_ts:
+          type: string
+          format: date-time
+        median_lag_ms:
+          type: integer
+        reconnect_count_1h:
+          type: integer
+        consecutive_errors:
+          type: integer
+        stale:
+          type: boolean
+        updated_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Error message
