@@ -43,6 +43,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /v1/price/raw", s.handleRaw)
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/health/feeds", s.handleFeedHealth)
+	mux.HandleFunc("GET /v1/price/settlement", s.handleSettlement)
 
 	// WebSocket
 	mux.HandleFunc("GET "+s.wsPath, s.wsHub.HandleWS)

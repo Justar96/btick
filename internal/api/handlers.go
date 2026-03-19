@@ -68,16 +68,16 @@ func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	var resp []map[string]interface{}
 	for _, snap := range snapshots {
 		resp = append(resp, map[string]interface{}{
-			"ts_second":      snap.TSSecond.Format(time.RFC3339),
-			"symbol":         snap.CanonicalSymbol,
-			"price":          snap.CanonicalPrice.String(),
-			"basis":          snap.Basis,
-			"is_stale":       snap.IsStale,
-			"is_degraded":    snap.IsDegraded,
-			"quality_score":  snap.QualityScore.InexactFloat64(),
-			"source_count":   snap.SourceCount,
-			"sources_used":   snap.SourcesUsed,
-			"finalized_at":   snap.FinalizedAt.Format(time.RFC3339Nano),
+			"ts_second":     snap.TSSecond.Format(time.RFC3339),
+			"symbol":        snap.CanonicalSymbol,
+			"price":         snap.CanonicalPrice.String(),
+			"basis":         snap.Basis,
+			"is_stale":      snap.IsStale,
+			"is_degraded":   snap.IsDegraded,
+			"quality_score": snap.QualityScore.InexactFloat64(),
+			"source_count":  snap.SourceCount,
+			"sources_used":  snap.SourcesUsed,
+			"finalized_at":  snap.FinalizedAt.Format(time.RFC3339Nano),
 		})
 	}
 
@@ -212,6 +212,77 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp["latest_price"] = latest.Price.String()
 		resp["latest_ts"] = latest.TS.Format(time.RFC3339Nano)
 		resp["source_count"] = latest.SourceCount
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) handleSettlement(w http.ResponseWriter, r *http.Request) {
+	tsStr := r.URL.Query().Get("ts")
+	if tsStr == "" {
+		http.Error(w, `{"error":"ts parameter required (RFC3339 format, e.g. 2026-03-19T09:05:00Z)"}`, http.StatusBadRequest)
+		return
+	}
+
+	ts, err := time.Parse(time.RFC3339, tsStr)
+	if err != nil {
+		http.Error(w, `{"error":"invalid ts format, use RFC3339 (e.g. 2026-03-19T09:05:00Z)"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Truncate to second boundary
+	ts = ts.UTC().Truncate(time.Second)
+
+	// Validate it's a 5-minute boundary for prediction markets
+	if ts.Second() != 0 || ts.Minute()%5 != 0 {
+		http.Error(w, `{"error":"ts must be on a 5-minute boundary (e.g. 09:05:00, 09:10:00)"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Don't allow future timestamps
+	now := time.Now().UTC()
+	if ts.After(now) {
+		http.Error(w, `{"error":"ts cannot be in the future"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Require at least 5 seconds of finalization grace period
+	if now.Sub(ts) < 5*time.Second {
+		http.Error(w, `{"error":"settlement price not yet finalized, wait a few seconds"}`, http.StatusTooEarly)
+		return
+	}
+
+	if s.db == nil {
+		http.Error(w, `{"error":"database not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	snapshot, err := s.db.QuerySnapshotAt(r.Context(), ts)
+	if err != nil {
+		s.logger.Error("query settlement snapshot failed", "error", err, "ts", ts)
+		http.Error(w, `{"error":"settlement price not found for this timestamp"}`, http.StatusNotFound)
+		return
+	}
+
+	// Check quality - warn if degraded or stale
+	status := "confirmed"
+	if snapshot.IsStale {
+		status = "stale"
+	} else if snapshot.IsDegraded {
+		status = "degraded"
+	}
+
+	resp := map[string]interface{}{
+		"settlement_ts":  ts.Format(time.RFC3339),
+		"symbol":         snapshot.CanonicalSymbol,
+		"price":          snapshot.CanonicalPrice.String(),
+		"status":         status,
+		"basis":          snapshot.Basis,
+		"quality_score":  snapshot.QualityScore.InexactFloat64(),
+		"source_count":   snapshot.SourceCount,
+		"sources_used":   snapshot.SourcesUsed,
+		"finalized_at":   snapshot.FinalizedAt.Format(time.RFC3339Nano),
+		"source_details": snapshot.SourceDetailsJSON,
 	}
 
 	json.NewEncoder(w).Encode(resp)

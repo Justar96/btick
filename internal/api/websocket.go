@@ -32,8 +32,9 @@ type WSHub struct {
 }
 
 type wsClient struct {
-	conn   *websocket.Conn
-	sendCh chan []byte
+	conn      *websocket.Conn
+	sendCh    chan []byte
+	closeOnce sync.Once
 }
 
 var upgrader = websocket.Upgrader{
@@ -82,10 +83,12 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	// Writer goroutine
 	go func() {
 		defer func() {
-			conn.Close()
-			h.mu.Lock()
-			delete(h.clients, client)
-			h.mu.Unlock()
+			client.closeOnce.Do(func() {
+				conn.Close()
+				h.mu.Lock()
+				delete(h.clients, client)
+				h.mu.Unlock()
+			})
 		}()
 
 		pingTicker := time.NewTicker(30 * time.Second)
@@ -114,13 +117,16 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	// Reader goroutine (drain incoming messages)
 	go func() {
 		defer func() {
-			h.mu.Lock()
-			delete(h.clients, client)
-			h.mu.Unlock()
-			conn.Close()
+			client.closeOnce.Do(func() {
+				conn.Close()
+				h.mu.Lock()
+				delete(h.clients, client)
+				h.mu.Unlock()
+			})
 		}()
 
 		conn.SetReadLimit(4096)
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		conn.SetPongHandler(func(string) error {
 			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			return nil
