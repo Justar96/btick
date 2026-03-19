@@ -1,0 +1,55 @@
+canonical_symbol: BTC/USD
+
+server:
+  http_addr: ":8080"
+  ws_path: /ws/price
+
+database:
+  dsn: "${DATABASE_URL}"
+  max_conns: 20
+  run_migrations: true
+
+sources:
+  - name: binance
+    enabled: true
+    ws_url: "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@bookTicker"
+    native_symbol: btcusdt
+    use_book_ticker_fallback: true
+    ping_interval_sec: 15
+    max_conn_lifetime_sec: 86000
+
+  - name: coinbase
+    enabled: true
+    ws_url: "wss://advanced-trade-ws.coinbase.com"
+    native_symbol: BTC-USD
+    use_book_ticker_fallback: true
+    jwt: ""
+    ping_interval_sec: 25
+    max_conn_lifetime_sec: 0
+
+  - name: kraken
+    enabled: true
+    ws_url: "wss://ws.kraken.com/v2"
+    native_symbol: BTC/USD
+    use_ticker_fallback: true
+    ping_interval_sec: 30
+    max_conn_lifetime_sec: 0
+
+pricing:
+  mode: multi_venue_median
+  minimum_healthy_sources: 2
+  trade_freshness_window_ms: 2000
+  quote_freshness_window_ms: 1000
+  late_arrival_grace_ms: 250
+  outlier_reject_pct: 1.0
+  carry_forward_max_seconds: 10
+
+storage:
+  raw_retention_days: 14
+  snapshots_retention_days: 365
+  batch_insert_max_rows: 1000
+  batch_insert_max_delay_ms: 200
+
+health:
+  source_stale_after_ms: 3000
+  canonical_stale_after_ms: 3000

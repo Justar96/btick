@@ -77,10 +77,10 @@ func (p PricingConfig) LateArrivalGrace() time.Duration {
 }
 
 type StorageConfig struct {
-	RawRetentionDays      int `yaml:"raw_retention_days"`
+	RawRetentionDays       int `yaml:"raw_retention_days"`
 	SnapshotsRetentionDays int `yaml:"snapshots_retention_days"`
-	BatchInsertMaxRows    int `yaml:"batch_insert_max_rows"`
-	BatchInsertMaxDelayMs int `yaml:"batch_insert_max_delay_ms"`
+	BatchInsertMaxRows     int `yaml:"batch_insert_max_rows"`
+	BatchInsertMaxDelayMs  int `yaml:"batch_insert_max_delay_ms"`
 }
 
 func (s StorageConfig) BatchInsertMaxDelay() time.Duration {
@@ -105,9 +105,15 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Expand environment variables in config
+	expanded := os.ExpandEnv(string(data))
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, err
+	}
+	// Allow DATABASE_URL env var to override config
+	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
+		cfg.Database.DSN = dbURL
 	}
 	if cfg.Server.HTTPAddr == "" {
 		cfg.Server.HTTPAddr = ":8080"

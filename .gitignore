@@ -36,6 +36,7 @@ Thumbs.db
 .env.*.local
 *.local.yaml
 config.local.yaml
+config.yaml
 
 # Logs
 *.log
