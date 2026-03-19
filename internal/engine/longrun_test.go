@@ -77,34 +77,31 @@ func TestSnapshotEngine_SimulatedHour(t *testing.T) {
 	basePrice := 84000.0
 	priceVar := 0.0
 
-	for {
-		select {
-		case <-ticker.C:
-			if time.Since(start) >= testDuration {
-				goto done
-			}
-
-			// Random walk price
-			priceVar += (float64(time.Now().UnixNano()%100) - 50) / 10.0
-			price := basePrice + priceVar
-
-			// Pick source
-			source := sources[time.Now().UnixNano()%3]
-
-			inCh <- domain.RawEvent{
-				Source:          source,
-				SymbolCanonical: "BTC/USD",
-				EventType:       "trade",
-				ExchangeTS:      time.Now(),
-				RecvTS:          time.Now(),
-				Price:           decimal.NewFromFloat(price),
-				TradeID:         string(rune(atomic.LoadInt64(&eventsProcessed))),
-			}
-			atomic.AddInt64(&eventsProcessed, 1)
+loop:
+	for range ticker.C {
+		if time.Since(start) >= testDuration {
+			break loop
 		}
+
+		// Random walk price
+		priceVar += (float64(time.Now().UnixNano()%100) - 50) / 10.0
+		price := basePrice + priceVar
+
+		// Pick source
+		source := sources[time.Now().UnixNano()%3]
+
+		inCh <- domain.RawEvent{
+			Source:          source,
+			SymbolCanonical: "BTC/USD",
+			EventType:       "trade",
+			ExchangeTS:      time.Now(),
+			RecvTS:          time.Now(),
+			Price:           decimal.NewFromFloat(price),
+			TradeID:         string(rune(atomic.LoadInt64(&eventsProcessed))),
+		}
+		atomic.AddInt64(&eventsProcessed, 1)
 	}
 
-done:
 	cancel()
 	time.Sleep(500 * time.Millisecond)
 
