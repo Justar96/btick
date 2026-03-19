@@ -207,6 +207,26 @@ func (db *DB) QueryRawTicks(ctx context.Context, source string, start, end time.
 	return results, rows.Err()
 }
 
+// QuerySnapshotAt returns the snapshot at a specific second (for settlement).
+func (db *DB) QuerySnapshotAt(ctx context.Context, ts time.Time) (*domain.Snapshot1s, error) {
+	const q = `SELECT ts_second, canonical_symbol, canonical_price, basis,
+		is_stale, is_degraded, quality_score, source_count,
+		sources_used, source_details_json, last_event_exchange_ts, finalized_at
+	FROM snapshots_1s
+	WHERE ts_second = $1`
+
+	var s domain.Snapshot1s
+	err := db.Pool.QueryRow(ctx, q, ts).Scan(
+		&s.TSSecond, &s.CanonicalSymbol, &s.CanonicalPrice, &s.Basis,
+		&s.IsStale, &s.IsDegraded, &s.QualityScore, &s.SourceCount,
+		&s.SourcesUsed, &s.SourceDetailsJSON, &s.LastEventExchangeTS, &s.FinalizedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 // QueryFeedHealth returns all feed health records.
 func (db *DB) QueryFeedHealth(ctx context.Context) ([]domain.FeedHealth, error) {
 	const q = `SELECT source, conn_state, last_message_ts, last_trade_ts,
@@ -236,4 +256,3 @@ func (db *DB) QueryFeedHealth(ctx context.Context) ([]domain.FeedHealth, error) 
 	}
 	return results, rows.Err()
 }
-
