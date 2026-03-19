@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/shopspring/decimal"
 
 	"github.com/justar9/btc-price-tick/internal/domain"

@@ -1,0 +1,71 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+btctick
+/cmd/btctick/btctick
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment and config overrides
+.env
+.env.local
+.env.*.local
+*.local.yaml
+config.local.yaml
+
+# Logs
+*.log
+logs/
+
+# Build output
+/bin/
+/dist/
+/build/
+
+# Debug files
+debug
+*.prof
+*.pprof
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets and credentials
+*.pem
+*.key
+secrets/
+credentials/
+
+# Agents
+.agents/
