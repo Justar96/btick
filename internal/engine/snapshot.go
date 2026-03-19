@@ -42,17 +42,23 @@ type SnapshotEngine struct {
 	// Latest state for API
 	latestMu    sync.RWMutex
 	latestState *domain.LatestState
+
+	// Semaphore to limit concurrent snapshot finalizations
+	finalizeSem chan struct{}
+
+	// Buffered channel for canonical tick DB writes
+	ticksToWrite chan domain.CanonicalTick
 }
 
 type venueState struct {
-	lastTrade       *tradeInfo
-	lastQuote       *quoteInfo
+	lastTrade *tradeInfo
+	lastQuote *quoteInfo
 }
 
 type tradeInfo struct {
-	price    decimal.Decimal
-	ts       time.Time
-	tradeID  string
+	price   decimal.Decimal
+	ts      time.Time
+	tradeID string
 }
 
 type quoteInfo struct {
@@ -79,6 +85,8 @@ func NewSnapshotEngine(
 		tickCh:          make(chan domain.CanonicalTick, 1000),
 		venueStates:     make(map[string]*venueState),
 		logger:          logger.With("component", "snapshot_engine"),
+		finalizeSem:     make(chan struct{}, 10), // max 10 concurrent finalizations
+		ticksToWrite:    make(chan domain.CanonicalTick, 500),
 	}
 }
 
@@ -106,6 +114,9 @@ func (e *SnapshotEngine) Run(ctx context.Context) {
 		"min_sources", e.cfg.MinimumHealthySources,
 		"trade_freshness_ms", e.cfg.TradeFreshnessWindowMs,
 	)
+
+	// Start canonical tick writer goroutine
+	go e.runTickWriter(ctx)
 
 	// Wait until the next second boundary, then tick every second
 	now := time.Now().UTC()
@@ -139,11 +150,19 @@ func (e *SnapshotEngine) Run(ctx context.Context) {
 		case t := <-snapshotTicker.C:
 			// Finalize the snapshot for the previous second, after watermark delay
 			snapshotSecond := t.UTC().Truncate(time.Second).Add(-time.Second)
-			go func(ss time.Time) {
-				// Wait for watermark
-				time.Sleep(watermark)
-				e.finalizeSnapshot(ctx, ss)
-			}(snapshotSecond)
+
+			// Acquire semaphore (non-blocking check first)
+			select {
+			case e.finalizeSem <- struct{}{}:
+				go func(ss time.Time) {
+					defer func() { <-e.finalizeSem }()
+					// Wait for watermark
+					time.Sleep(watermark)
+					e.finalizeSnapshot(ctx, ss)
+				}(snapshotSecond)
+			default:
+				e.logger.Warn("snapshot finalization backlogged, skipping", "ts", snapshotSecond)
+			}
 		}
 	}
 }
@@ -216,15 +235,13 @@ func (e *SnapshotEngine) emitTick(evt domain.RawEvent) {
 	// Update latest state
 	e.updateLatestState(tick)
 
-	// Write to DB (fire-and-forget in background to not block the event loop)
+	// Queue for DB write (with backpressure)
 	if e.db != nil {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := e.db.InsertCanonicalTick(ctx, tick); err != nil {
-				e.logger.Error("insert canonical tick failed", "error", err)
-			}
-		}()
+		select {
+		case e.ticksToWrite <- tick:
+		default:
+			e.logger.Warn("canonical tick write buffer full, dropping")
+		}
 	}
 
 	select {
@@ -466,6 +483,9 @@ func computeMedian(prices []decimal.Decimal) decimal.Decimal {
 func (e *SnapshotEngine) computeQuality(refs []domain.VenueRefPrice, isStale bool, carryDurSec int) decimal.Decimal {
 	if isStale {
 		// Decaying quality for carry-forward
+		if e.cfg.CarryForwardMaxSeconds <= 0 {
+			return decimal.Zero
+		}
 		decay := math.Max(0, 1.0-float64(carryDurSec)/float64(e.cfg.CarryForwardMaxSeconds))
 		return decimal.NewFromFloat(decay * 0.3) // max 0.3 when stale
 	}
@@ -497,6 +517,34 @@ func (e *SnapshotEngine) computeQuality(refs []domain.VenueRefPrice, isStale boo
 
 	score := sourceScore*0.5 + agePenalty*0.3 + midpointPenalty*0.2
 	return decimal.NewFromFloat(math.Round(score*10000) / 10000)
+}
+
+// runTickWriter drains ticksToWrite channel and persists canonical ticks to DB.
+func (e *SnapshotEngine) runTickWriter(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			// Drain remaining ticks on shutdown
+			for {
+				select {
+				case tick := <-e.ticksToWrite:
+					writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					if err := e.db.InsertCanonicalTick(writeCtx, tick); err != nil {
+						e.logger.Error("insert canonical tick failed", "error", err)
+					}
+					cancel()
+				default:
+					return
+				}
+			}
+		case tick := <-e.ticksToWrite:
+			writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := e.db.InsertCanonicalTick(writeCtx, tick); err != nil {
+				e.logger.Error("insert canonical tick failed", "error", err)
+			}
+			cancel()
+		}
+	}
 }
 
 func (e *SnapshotEngine) updateLatestState(tick domain.CanonicalTick) {
