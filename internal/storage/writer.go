@@ -13,14 +13,14 @@ import (
 
 // Writer batches raw events and writes them to PostgreSQL.
 type Writer struct {
-	db             *DB
-	logger         *slog.Logger
-	maxRows        int
-	maxDelay       time.Duration
+	db       *DB
+	logger   *slog.Logger
+	maxRows  int
+	maxDelay time.Duration
 
-	mu             sync.Mutex
-	batch          []domain.RawEvent
-	lastFlush      time.Time
+	mu        sync.Mutex
+	batch     []domain.RawEvent
+	lastFlush time.Time
 }
 
 func NewWriter(db *DB, maxRows int, maxDelay time.Duration, logger *slog.Logger) *Writer {
@@ -103,33 +103,69 @@ func (w *Writer) flush(ctx context.Context) {
 		})
 	}
 
-	// Use CopyFrom for efficient bulk insert
-	_, err := w.db.Pool.CopyFrom(
-		ctx,
-		pgx.Identifier{"raw_ticks"},
-		[]string{
-			"event_id", "source", "symbol_native", "symbol_canonical",
-			"event_type", "exchange_ts", "recv_ts", "price", "size",
-			"side", "trade_id", "sequence", "bid", "ask",
-			"raw_payload", "ingest_partition_date",
-		},
-		pgx.CopyFromRows(rows),
-	)
+	cols := []string{
+		"event_id", "source", "symbol_native", "symbol_canonical",
+		"event_type", "exchange_ts", "recv_ts", "price", "size",
+		"side", "trade_id", "sequence", "bid", "ask",
+		"raw_payload", "ingest_partition_date",
+	}
 
-	elapsed := time.Since(start)
-
+	// Use temp table + COPY + INSERT ... ON CONFLICT to get bulk speed
+	// with duplicate handling. CopyFrom alone cannot handle ON CONFLICT.
+	tx, err := w.db.Pool.Begin(ctx)
 	if err != nil {
-		w.logger.Error("batch insert failed, falling back to individual inserts",
+		w.logger.Error("begin tx failed, falling back to individual inserts",
 			"error", err,
 			"batch_size", len(batch),
-			"elapsed", elapsed,
+		)
+		w.insertIndividually(ctx, batch)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `CREATE TEMP TABLE _stage (LIKE raw_ticks INCLUDING DEFAULTS) ON COMMIT DROP`)
+	if err != nil {
+		w.logger.Error("create staging table failed, falling back to individual inserts",
+			"error", err,
+			"batch_size", len(batch),
 		)
 		w.insertIndividually(ctx, batch)
 		return
 	}
 
+	_, err = tx.CopyFrom(ctx, pgx.Identifier{"_stage"}, cols, pgx.CopyFromRows(rows))
+	if err != nil {
+		w.logger.Error("copy to staging table failed, falling back to individual inserts",
+			"error", err,
+			"batch_size", len(batch),
+		)
+		w.insertIndividually(ctx, batch)
+		return
+	}
+
+	tag, err := tx.Exec(ctx, `INSERT INTO raw_ticks SELECT * FROM _stage ON CONFLICT DO NOTHING`)
+	if err != nil {
+		w.logger.Error("merge from staging failed, falling back to individual inserts",
+			"error", err,
+			"batch_size", len(batch),
+		)
+		w.insertIndividually(ctx, batch)
+		return
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		w.logger.Error("commit failed, falling back to individual inserts",
+			"error", err,
+			"batch_size", len(batch),
+		)
+		w.insertIndividually(ctx, batch)
+		return
+	}
+
+	elapsed := time.Since(start)
 	w.logger.Debug("batch flushed",
 		"rows", len(batch),
+		"inserted", tag.RowsAffected(),
 		"elapsed", elapsed,
 	)
 }

@@ -1,0 +1,16 @@
+.git
+.gitignore
+.dockerignore
+.agents
+.idea
+.vscode
+*.md
+docs/
+*.log
+*.prof
+*.pprof
+*.tmp
+.env
+.env.*
+config.yaml
+config.local.yaml

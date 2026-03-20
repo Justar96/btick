@@ -5,7 +5,7 @@ server:
   ws_path: /ws/price
 
 database:
-  dsn: "postgres://localhost:5432/btctick?sslmode=disable"
+  dsn: "postgresql://postgres:EcksUDUDEcfkgodMbyxtKmAPoagPPRUs@autorack.proxy.rlwy.net:25333/railway"
   max_conns: 20
   run_migrations: true
 

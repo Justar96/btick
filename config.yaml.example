@@ -45,7 +45,8 @@ pricing:
   carry_forward_max_seconds: 10
 
 storage:
-  raw_retention_days: 14
+  raw_retention_days: 1
+  canonical_retention_days: 1
   snapshots_retention_days: 365
   batch_insert_max_rows: 1000
   batch_insert_max_delay_ms: 200

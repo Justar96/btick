@@ -78,6 +78,7 @@ func (p PricingConfig) LateArrivalGrace() time.Duration {
 
 type StorageConfig struct {
 	RawRetentionDays       int `yaml:"raw_retention_days"`
+	CanonicalRetentionDays int `yaml:"canonical_retention_days"`
 	SnapshotsRetentionDays int `yaml:"snapshots_retention_days"`
 	BatchInsertMaxRows     int `yaml:"batch_insert_max_rows"`
 	BatchInsertMaxDelayMs  int `yaml:"batch_insert_max_delay_ms"`
@@ -138,6 +139,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Pricing.CarryForwardMaxSeconds == 0 {
 		cfg.Pricing.CarryForwardMaxSeconds = 10
+	}
+	if cfg.Storage.CanonicalRetentionDays == 0 {
+		cfg.Storage.CanonicalRetentionDays = cfg.Storage.RawRetentionDays
 	}
 	if cfg.Storage.BatchInsertMaxRows == 0 {
 		cfg.Storage.BatchInsertMaxRows = 1000

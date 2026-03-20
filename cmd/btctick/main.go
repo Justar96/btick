@@ -155,6 +155,20 @@ func main() {
 	// and broadcast to WebSocket clients by the API server's broadcast loop.
 	// No separate tick writer goroutine is needed.
 
+	// Retention pruner
+	if db != nil {
+		pruner := storage.NewPruner(db, storage.PrunerConfig{
+			RawRetentionDays:       cfg.Storage.RawRetentionDays,
+			SnapshotsRetentionDays: cfg.Storage.SnapshotsRetentionDays,
+			CanonicalRetentionDays: cfg.Storage.CanonicalRetentionDays,
+		}, logger)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pruner.Run(ctx)
+		}()
+	}
+
 	// Feed health updater
 	if db != nil {
 		wg.Add(1)
