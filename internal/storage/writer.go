@@ -123,7 +123,13 @@ func (w *Writer) flush(ctx context.Context) {
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `CREATE TEMP TABLE _stage (LIKE raw_ticks INCLUDING DEFAULTS) ON COMMIT DROP`)
+	_, err = tx.Exec(ctx, `CREATE TEMP TABLE _stage (
+		event_id UUID, source TEXT, symbol_native TEXT, symbol_canonical TEXT,
+		event_type TEXT, exchange_ts TIMESTAMPTZ, recv_ts TIMESTAMPTZ,
+		price NUMERIC(20,8), size NUMERIC(28,12), side TEXT,
+		trade_id TEXT, sequence TEXT, bid NUMERIC(20,8), ask NUMERIC(20,8),
+		raw_payload JSONB, ingest_partition_date DATE
+	) ON COMMIT DROP`)
 	if err != nil {
 		w.logger.Error("create staging table failed, falling back to individual inserts",
 			"error", err,

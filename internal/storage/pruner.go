@@ -18,29 +18,55 @@ type PrunerConfig struct {
 
 // Pruner periodically deletes expired rows from raw_ticks, canonical_ticks,
 // and snapshots_1s to prevent unbounded table growth.
+// When TimescaleDB is available, retention is handled natively via
+// drop_chunks policies and this pruner becomes a no-op.
 type Pruner struct {
-	db     *DB
-	cfg    PrunerConfig
-	logger *slog.Logger
+	db          *DB
+	cfg         PrunerConfig
+	logger      *slog.Logger
+	timescaleDB bool
 }
 
 // NewPruner creates a new retention pruner.
 func NewPruner(db *DB, cfg PrunerConfig, logger *slog.Logger) *Pruner {
 	if cfg.Interval <= 0 {
-		cfg.Interval = 5 * time.Minute
+		cfg.Interval = 1 * time.Minute
 	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 10000
 	}
+
+	tsdb := detectTimescaleDB(db, logger)
+
 	return &Pruner{
-		db:     db,
-		cfg:    cfg,
-		logger: logger.With("component", "pruner"),
+		db:          db,
+		cfg:         cfg,
+		logger:      logger.With("component", "pruner"),
+		timescaleDB: tsdb,
 	}
+}
+
+// detectTimescaleDB checks if the TimescaleDB extension is installed.
+func detectTimescaleDB(db *DB, logger *slog.Logger) bool {
+	var installed bool
+	err := db.Pool.QueryRow(context.Background(),
+		`SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')`,
+	).Scan(&installed)
+	if err != nil {
+		logger.Warn("failed to detect TimescaleDB", "error", err)
+		return false
+	}
+	return installed
 }
 
 // Run starts the pruner loop. It blocks until ctx is cancelled.
 func (p *Pruner) Run(ctx context.Context) {
+	if p.timescaleDB {
+		p.logger.Info("TimescaleDB detected, retention handled by native policies — pruner idle")
+		<-ctx.Done()
+		return
+	}
+
 	p.logger.Info("pruner started",
 		"raw_retention_days", p.cfg.RawRetentionDays,
 		"snapshots_retention_days", p.cfg.SnapshotsRetentionDays,

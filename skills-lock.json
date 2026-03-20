@@ -6,6 +6,11 @@
       "sourceType": "github",
       "computedHash": "c90a0798a12ea2d9191508439ec3191dd96713310615260ebe82ec5a09a4a434"
     },
+    "timescaledb": {
+      "source": "troykelly/claude-skills",
+      "sourceType": "github",
+      "computedHash": "39f455dc20d5aa6db8c5310ab728412fe8c1c7dc861ff46df9edda8b973f669e"
+    },
     "use-railway": {
       "source": "railwayapp/railway-skills",
       "sourceType": "github",
