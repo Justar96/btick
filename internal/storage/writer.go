@@ -44,7 +44,9 @@ func (w *Writer) Run(ctx context.Context, inCh <-chan domain.RawEvent) {
 	for {
 		select {
 		case <-ctx.Done():
-			w.flush(context.Background()) // final flush
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			w.flush(shutdownCtx)
+			shutdownCancel()
 			w.logger.Info("writer stopped")
 			return
 

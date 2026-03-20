@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +20,27 @@ import (
 	"github.com/justar9/btc-price-tick/internal/normalizer"
 	"github.com/justar9/btc-price-tick/internal/storage"
 )
+
+// safeGo runs fn in a goroutine with panic recovery. On panic it logs the
+// stack trace, marks the WaitGroup done, and cancels the context so the
+// rest of the process shuts down cleanly instead of crashing silently.
+func safeGo(wg *sync.WaitGroup, cancel context.CancelFunc, logger *slog.Logger, name string, fn func()) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("goroutine panicked",
+					"component", name,
+					"panic", fmt.Sprintf("%v", r),
+					"stack", string(debug.Stack()),
+				)
+				cancel() // trigger graceful shutdown
+			}
+		}()
+		fn()
+	}()
+}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
@@ -80,20 +103,17 @@ func main() {
 			continue
 		}
 
-		wg.Add(1)
-		go func(s config.SourceConfig) {
-			defer wg.Done()
+		s := src
+		safeGo(&wg, cancel, logger, "adapter-"+s.Name, func() {
 			startAdapter(ctx, s, rawCh, logger)
-		}(src)
+		})
 	}
 
 	// Normalizer
 	norm := normalizer.New(rawCh, normalizedCh, logger)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	safeGo(&wg, cancel, logger, "normalizer", func() {
 		norm.Run(ctx)
-	}()
+	})
 
 	// Fan-out: normalizedCh -> writerCh + engineCh
 	wg.Add(1)
@@ -101,22 +121,42 @@ func main() {
 		defer wg.Done()
 		defer close(writerCh)
 		defer close(engineCh)
+		var writerDrops, engineDrops int64
 		for {
 			select {
 			case <-ctx.Done():
+				if writerDrops > 0 || engineDrops > 0 {
+					logger.Warn("fan-out final drop counts",
+						"writer_drops", writerDrops,
+						"engine_drops", engineDrops,
+					)
+				}
 				return
 			case evt, ok := <-normalizedCh:
 				if !ok {
 					return
 				}
-				// Non-blocking send to both
 				select {
 				case writerCh <- evt:
 				default:
+					writerDrops++
+					if writerDrops%1000 == 1 {
+						logger.Warn("writer channel full, dropping event",
+							"source", evt.Source,
+							"total_drops", writerDrops,
+						)
+					}
 				}
 				select {
 				case engineCh <- evt:
 				default:
+					engineDrops++
+					if engineDrops%1000 == 1 {
+						logger.Warn("engine channel full, dropping event",
+							"source", evt.Source,
+							"total_drops", engineDrops,
+						)
+					}
 				}
 			}
 		}
@@ -129,11 +169,9 @@ func main() {
 			cfg.Storage.BatchInsertMaxDelay(),
 			logger,
 		)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		safeGo(&wg, cancel, logger, "writer", func() {
 			writer.Run(ctx, writerCh)
-		}()
+		})
 	}
 
 	// Snapshot engine
@@ -145,11 +183,9 @@ func main() {
 		engineCh,
 		logger,
 	)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	safeGo(&wg, cancel, logger, "snapshot-engine", func() {
 		eng.Run(ctx)
-	}()
+	})
 
 	// Note: canonical ticks are written to DB by the snapshot engine directly
 	// and broadcast to WebSocket clients by the API server's broadcast loop.
@@ -162,31 +198,25 @@ func main() {
 			SnapshotsRetentionDays: cfg.Storage.SnapshotsRetentionDays,
 			CanonicalRetentionDays: cfg.Storage.CanonicalRetentionDays,
 		}, logger)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		safeGo(&wg, cancel, logger, "pruner", func() {
 			pruner.Run(ctx)
-		}()
+		})
 	}
 
 	// Feed health updater
 	if db != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		safeGo(&wg, cancel, logger, "feed-health", func() {
 			updateFeedHealth(ctx, cfg, db, logger)
-		}()
+		})
 	}
 
 	// API server
 	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, db, eng, logger)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	safeGo(&wg, cancel, logger, "api-server", func() {
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("API server error", "error", err)
 		}
-	}()
+	})
 
 	logger.Info("all components running",
 		"http", cfg.Server.HTTPAddr,
