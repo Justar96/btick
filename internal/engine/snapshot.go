@@ -18,8 +18,6 @@ import (
 )
 
 const (
-	canonicalTickBatchMaxRows  = 128
-	canonicalTickBatchMaxDelay = 100 * time.Millisecond
 	pipelineLatencyLogInterval = time.Minute
 	maxPipelineLatency         = time.Minute
 )
@@ -70,7 +68,8 @@ type SnapshotEngine struct {
 	finalizeSem chan struct{}
 
 	// Buffered channel for canonical tick DB writes
-	ticksToWrite chan domain.CanonicalTick
+	ticksToWrite     chan domain.CanonicalTick
+	snapshotsToWrite chan domain.Snapshot1s
 }
 
 type venueState struct {
@@ -99,18 +98,19 @@ func NewSnapshotEngine(
 	logger *slog.Logger,
 ) *SnapshotEngine {
 	return &SnapshotEngine{
-		cfg:             cfg,
-		canonicalSymbol: canonicalSymbol,
-		staleAfter:      staleAfter,
-		db:              db,
-		inCh:            inCh,
-		snapshotCh:      make(chan domain.Snapshot1s, 100),
-		tickCh:          make(chan domain.CanonicalTick, 1000),
-		venueStates:     make(map[string]*venueState),
-		logger:          logger.With("component", "snapshot_engine"),
-		latency:         pipelineLatencyStats{since: time.Now().UTC()},
-		finalizeSem:     make(chan struct{}, 10), // max 10 concurrent finalizations
-		ticksToWrite:    make(chan domain.CanonicalTick, 500),
+		cfg:              cfg,
+		canonicalSymbol:  canonicalSymbol,
+		staleAfter:       staleAfter,
+		db:               db,
+		inCh:             inCh,
+		snapshotCh:       make(chan domain.Snapshot1s, 100),
+		tickCh:           make(chan domain.CanonicalTick, 1000),
+		venueStates:      make(map[string]*venueState),
+		logger:           logger.With("component", "snapshot_engine"),
+		latency:          pipelineLatencyStats{since: time.Now().UTC()},
+		finalizeSem:      make(chan struct{}, 10), // max 10 concurrent finalizations
+		ticksToWrite:     make(chan domain.CanonicalTick, 500),
+		snapshotsToWrite: make(chan domain.Snapshot1s, 32),
 	}
 }
 
@@ -139,8 +139,33 @@ func (e *SnapshotEngine) Run(ctx context.Context) {
 		"trade_freshness_ms", e.cfg.TradeFreshnessWindowMs,
 	)
 
-	// Start canonical tick writer goroutine
-	go e.runTickWriter(ctx)
+	var (
+		finalizeWg   sync.WaitGroup
+		writerWg     sync.WaitGroup
+		writerCancel context.CancelFunc
+	)
+
+	if e.db != nil {
+		writerCtx, cancel := context.WithCancel(context.Background())
+		writerCancel = cancel
+
+		writerWg.Add(2)
+		go func() {
+			defer writerWg.Done()
+			e.runTickWriter(writerCtx)
+		}()
+		go func() {
+			defer writerWg.Done()
+			e.runSnapshotWriter(writerCtx)
+		}()
+	}
+	defer func() {
+		finalizeWg.Wait()
+		if writerCancel != nil {
+			writerCancel()
+			writerWg.Wait()
+		}
+	}()
 
 	// Wait until the next second boundary, then tick every second
 	now := time.Now().UTC()
@@ -178,8 +203,12 @@ func (e *SnapshotEngine) Run(ctx context.Context) {
 			// Acquire semaphore (non-blocking check first)
 			select {
 			case e.finalizeSem <- struct{}{}:
+				finalizeWg.Add(1)
 				go func(ss time.Time) {
-					defer func() { <-e.finalizeSem }()
+					defer func() {
+						<-e.finalizeSem
+						finalizeWg.Done()
+					}()
 					// Wait for watermark
 					time.Sleep(watermark)
 					e.finalizeSnapshot(ctx, ss)
@@ -357,10 +386,12 @@ func (e *SnapshotEngine) finalizeSnapshot(ctx context.Context, snapshotSecond ti
 		FinalizedAt:         now,
 	}
 
-	// Write to DB
+	// Queue DB persistence without delaying broadcasts.
 	if e.db != nil {
-		if err := e.db.InsertSnapshot(ctx, snapshot); err != nil {
-			e.logger.Error("insert snapshot failed", "error", err, "ts", snapshotSecond)
+		select {
+		case e.snapshotsToWrite <- snapshot:
+		default:
+			e.logger.Warn("snapshot write buffer full, dropping", "ts", snapshotSecond)
 		}
 	}
 
@@ -618,78 +649,6 @@ func (e *SnapshotEngine) maybeLogPipelineLatency(now time.Time) {
 		"gt_1000ms", stats.gt1000Ms,
 	)
 }
-
-// runTickWriter drains ticksToWrite channel and persists canonical ticks to DB.
-func (e *SnapshotEngine) runTickWriter(ctx context.Context) {
-	flushTicker := time.NewTicker(canonicalTickBatchMaxDelay)
-	defer flushTicker.Stop()
-
-	batch := make([]domain.CanonicalTick, 0, canonicalTickBatchMaxRows)
-	flush := func(flushCtx context.Context) {
-		if len(batch) == 0 {
-			return
-		}
-
-		ticks := append([]domain.CanonicalTick(nil), batch...)
-		batch = batch[:0]
-
-		if err := e.db.InsertCanonicalTicks(flushCtx, ticks); err == nil {
-			return
-		} else {
-			e.logger.Error("insert canonical tick batch failed, falling back to individual inserts",
-				"error", err,
-				"batch_size", len(ticks),
-			)
-		}
-
-		for _, tick := range ticks {
-			if err := e.db.InsertCanonicalTick(flushCtx, tick); err != nil {
-				e.logger.Error("insert canonical tick failed",
-					"error", err,
-					"tick_id", tick.TickID,
-				)
-			}
-		}
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			for {
-				select {
-				case tick := <-e.ticksToWrite:
-					batch = append(batch, tick)
-					if len(batch) >= canonicalTickBatchMaxRows {
-						writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-						flush(writeCtx)
-						cancel()
-					}
-				default:
-					if len(batch) > 0 {
-						writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-						flush(writeCtx)
-						cancel()
-					}
-					return
-				}
-			}
-		case tick := <-e.ticksToWrite:
-			batch = append(batch, tick)
-			if len(batch) >= canonicalTickBatchMaxRows {
-				writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				flush(writeCtx)
-				cancel()
-			}
-		case <-flushTicker.C:
-			if len(batch) > 0 {
-				writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				flush(writeCtx)
-				cancel()
-			}
-		}
-	}
-}
-
 func (e *SnapshotEngine) updateLatestState(tick domain.CanonicalTick) {
 	e.latestMu.Lock()
 	defer e.latestMu.Unlock()
