@@ -17,6 +17,7 @@ import (
 	"github.com/justar9/btick/internal/config"
 	"github.com/justar9/btick/internal/domain"
 	"github.com/justar9/btick/internal/engine"
+	"github.com/justar9/btick/internal/metrics"
 	"github.com/justar9/btick/internal/normalizer"
 	"github.com/justar9/btick/internal/storage"
 )
@@ -74,15 +75,29 @@ func main() {
 	}()
 
 	// Database (optional — service can run without DB for testing)
-	var db *storage.DB
+	var ingestDB *storage.DB
+	var queryDB *storage.DB
+	var apiDB api.Store
 	if cfg.Database.DSN != "" {
-		db, err = storage.New(ctx, cfg.Database, logger)
+		ingestDB, queryDB, err = storage.NewPools(ctx, cfg.Database, logger)
 		if err != nil {
 			logger.Warn("database connection failed, running without persistence", "error", err)
 		} else {
-			defer db.Close()
-			logger.Info("database connected")
+			defer ingestDB.Close()
+			if queryDB != nil {
+				defer queryDB.Close()
+			}
+			ingestMaxConns, queryMaxConns := cfg.Database.PoolMaxConns()
+			logger.Info("database connected",
+				"ingest_max_conns", ingestMaxConns,
+				"query_max_conns", queryMaxConns,
+			)
 		}
+	}
+	if queryDB != nil {
+		apiDB = queryDB
+	} else if ingestDB != nil {
+		apiDB = ingestDB
 	}
 
 	// Channels
@@ -140,6 +155,7 @@ func main() {
 				case writerCh <- evt:
 				default:
 					writerDrops++
+					metrics.IncChannelDrop("writer")
 					if writerDrops%1000 == 1 {
 						logger.Warn("writer channel full, dropping event",
 							"source", evt.Source,
@@ -151,6 +167,7 @@ func main() {
 				case engineCh <- evt:
 				default:
 					engineDrops++
+					metrics.IncChannelDrop("engine")
 					if engineDrops%1000 == 1 {
 						logger.Warn("engine channel full, dropping event",
 							"source", evt.Source,
@@ -163,8 +180,8 @@ func main() {
 	}()
 
 	// Raw event writer
-	if db != nil {
-		writer := storage.NewWriter(db,
+	if ingestDB != nil {
+		writer := storage.NewWriter(ingestDB,
 			cfg.Storage.BatchInsertMaxRows,
 			cfg.Storage.BatchInsertMaxDelay(),
 			logger,
@@ -179,7 +196,7 @@ func main() {
 		cfg.Pricing,
 		cfg.CanonicalSymbol,
 		cfg.Health.CanonicalStaleAfter(),
-		db,
+		ingestDB,
 		engineCh,
 		logger,
 	)
@@ -192,8 +209,8 @@ func main() {
 	// No separate tick writer goroutine is needed.
 
 	// Retention pruner
-	if db != nil {
-		pruner := storage.NewPruner(db, storage.PrunerConfig{
+	if ingestDB != nil {
+		pruner := storage.NewPruner(ingestDB, storage.PrunerConfig{
 			RawRetentionDays:       cfg.Storage.RawRetentionDays,
 			SnapshotsRetentionDays: cfg.Storage.SnapshotsRetentionDays,
 			CanonicalRetentionDays: cfg.Storage.CanonicalRetentionDays,
@@ -204,14 +221,14 @@ func main() {
 	}
 
 	// Feed health updater
-	if db != nil {
+	if ingestDB != nil {
 		safeGo(&wg, cancel, logger, "feed-health", func() {
-			updateFeedHealth(ctx, cfg, db, logger)
+			updateFeedHealth(ctx, cfg, ingestDB, logger)
 		})
 	}
 
 	// API server
-	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, db, eng, logger)
+	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, apiDB, eng, logger)
 	safeGo(&wg, cancel, logger, "api-server", func() {
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("API server error", "error", err)

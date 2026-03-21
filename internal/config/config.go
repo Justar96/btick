@@ -59,9 +59,53 @@ func (w WSConfig) ReadDeadline() time.Duration {
 }
 
 type DatabaseConfig struct {
-	DSN           string `yaml:"dsn"`
-	MaxConns      int32  `yaml:"max_conns"`
-	RunMigrations bool   `yaml:"run_migrations"`
+	DSN            string `yaml:"dsn"`
+	MaxConns       int32  `yaml:"max_conns"`
+	IngestMaxConns int32  `yaml:"ingest_max_conns"`
+	QueryMaxConns  int32  `yaml:"query_max_conns"`
+	RunMigrations  bool   `yaml:"run_migrations"`
+}
+
+const (
+	defaultIngestPoolMaxConns int32 = 12
+	defaultQueryPoolMaxConns  int32 = 8
+)
+
+func (d DatabaseConfig) PoolMaxConns() (int32, int32) {
+	if d.IngestMaxConns > 0 || d.QueryMaxConns > 0 {
+		ingest := d.IngestMaxConns
+		query := d.QueryMaxConns
+		if ingest <= 0 {
+			ingest = defaultIngestPoolMaxConns
+		}
+		if query <= 0 {
+			query = defaultQueryPoolMaxConns
+		}
+		return ingest, query
+	}
+
+	if d.MaxConns <= 0 {
+		return defaultIngestPoolMaxConns, defaultQueryPoolMaxConns
+	}
+
+	if d.MaxConns == 1 {
+		return 1, 0
+	}
+
+	ingest := (d.MaxConns*3 + 4) / 5
+	if ingest >= d.MaxConns {
+		ingest = d.MaxConns - 1
+	}
+
+	query := d.MaxConns - ingest
+	if query <= 0 {
+		query = 1
+		if ingest > 1 {
+			ingest--
+		}
+	}
+
+	return ingest, query
 }
 
 type SourceConfig struct {

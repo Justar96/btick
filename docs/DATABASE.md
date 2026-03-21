@@ -32,8 +32,7 @@ CREATE TABLE raw_ticks (
     sequence              TEXT,                     -- Sequence number if provided
     bid                   NUMERIC(20,8),            -- Best bid (ticker only)
     ask                   NUMERIC(20,8),            -- Best ask (ticker only)
-    raw_payload           JSONB NOT NULL,           -- Original message for audit
-    ingest_partition_date DATE NOT NULL DEFAULT CURRENT_DATE
+    raw_payload           BYTEA NOT NULL            -- Original message bytes for audit/debug
 );
 -- Converted to TimescaleDB hypertable:
 SELECT create_hypertable('raw_ticks', 'exchange_ts',
@@ -42,9 +41,6 @@ SELECT create_hypertable('raw_ticks', 'exchange_ts',
 
 **Indexes:**
 ```sql
--- Query by symbol and time
-CREATE INDEX idx_raw_ticks_symbol_ts ON raw_ticks (symbol_canonical, exchange_ts DESC);
-
 -- Deduplication by trade ID (includes exchange_ts for hypertable compatibility)
 CREATE UNIQUE INDEX idx_raw_ticks_source_trade ON raw_ticks (source, trade_id, exchange_ts)
     WHERE trade_id IS NOT NULL;
@@ -56,10 +52,13 @@ ALTER TABLE raw_ticks SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'source, symbol_canonical',
     timescaledb.compress_orderby = 'exchange_ts DESC');
+ALTER TABLE raw_ticks SET (timescaledb.compress_bloomfilter = 'trade_id');
 SELECT add_compression_policy('raw_ticks', INTERVAL '2 hours');
 ```
 
-**Row Size:** ~500 bytes average (depends on raw_payload)
+**Bloom Filter:** `trade_id` bloom filtering is enabled for compressed chunks to speed up exact-match trade lookups without full decompression.
+
+**Row Size:** ~500 bytes average (depends on raw_payload size)
 
 **Growth Rate:** ~1-5 million rows/day
 
@@ -215,9 +214,13 @@ SELECT * FROM snapshots_1s WHERE 'binance' = ANY(sources_used);
 ### JSONB
 
 Structured data stored as JSONB:
-- `raw_payload` — Original exchange message
 - `source_details_json` — Per-source breakdown
 - `details_json` — Additional feed health info
+
+### BYTEA
+
+Opaque byte payloads:
+- `raw_payload` — Original exchange message bytes
 
 **Example source_details_json:**
 ```json
@@ -285,7 +288,7 @@ All time-series tables are TimescaleDB hypertables (required).
 
 ```sql
 CREATE MATERIALIZED VIEW ohlcv_1m
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.compress = true) AS
 SELECT
     time_bucket('1 minute', exchange_ts) AS bucket,
     source,
@@ -310,7 +313,7 @@ Hourly rollups of 1-second snapshots with quality and availability metrics.
 
 ```sql
 CREATE MATERIALIZED VIEW snapshot_rollups_1h
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.compress = true) AS
 SELECT
     time_bucket('1 hour', ts_second) AS bucket,
     canonical_symbol,
@@ -329,6 +332,32 @@ WITH NO DATA;
 ```
 
 **Policies:** Refresh every 5 minutes (7-day start offset, 5-minute end offset). Compressed after 14 days.
+
+### snapshot_rollups_1d
+
+Daily rollups of hourly snapshot aggregates for long-range dashboards.
+
+```sql
+CREATE MATERIALIZED VIEW snapshot_rollups_1d
+WITH (timescaledb.continuous, timescaledb.compress = true) AS
+SELECT
+    time_bucket('1 day', bucket) AS bucket,
+    canonical_symbol,
+    first(open, bucket) AS open,
+    max(high) AS high,
+    min(low) AS low,
+    last(close, bucket) AS close,
+    avg(avg_quality_score) AS avg_quality_score,
+    avg(avg_source_count)::NUMERIC(10,4) AS avg_source_count,
+    sum(snapshot_count) AS snapshot_count,
+    sum(stale_count) AS stale_count,
+    sum(degraded_count) AS degraded_count
+FROM snapshot_rollups_1h
+GROUP BY bucket, canonical_symbol
+WITH NO DATA;
+```
+
+**Policies:** Refresh every 1 hour (30-day start offset, 1-hour end offset). Compressed after 30 days. No retention policy by default.
 
 ---
 

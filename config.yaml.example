@@ -11,7 +11,8 @@ server:
 
 database:
   dsn: "${DATABASE_URL}"
-  max_conns: 20
+  ingest_max_conns: 12
+  query_max_conns: 8
   run_migrations: true
 
 sources:

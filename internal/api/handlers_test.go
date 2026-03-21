@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -678,6 +679,18 @@ func TestHandleFeedHealth_NoDB(t *testing.T) {
 	}
 }
 
+func TestHandleFeedHealth_TypedNilStore(t *testing.T) {
+	var store *mockStore
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, store, newMockEngine(nil), testLogger())
+	rr := httptest.NewRecorder()
+
+	s.handleFeedHealth(rr, httptest.NewRequest("GET", "/v1/health/feeds", nil))
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rr.Code)
+	}
+}
+
 func TestHandleFeedHealth_DBError(t *testing.T) {
 	store := &mockStore{feedHealthErr: errors.New("db fail")}
 	s := testServer(store, newMockEngine(nil))
@@ -934,6 +947,25 @@ func TestNewServer(t *testing.T) {
 	}
 	if s.wsHub == nil {
 		t.Fatal("wsHub should be initialized")
+	}
+}
+
+func TestServerHandler_Metrics(t *testing.T) {
+	s := testServer(nil, newMockEngine(nil))
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	rr := httptest.NewRecorder()
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "text/plain; version=0.0.4; charset=utf-8" {
+		t.Fatalf("unexpected content type: %s", got)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "btick_writer_flush_duration_seconds") {
+		t.Fatalf("expected metrics body to include writer flush metric, got %q", body)
 	}
 }
 

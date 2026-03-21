@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/justar9/btick/internal/config"
 	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/metrics"
 )
 
 // WSMessage is a message broadcast to WebSocket clients.
@@ -138,6 +139,7 @@ func (h *WSHub) shutdownClients() {
 	}
 	h.clients = make(map[*wsClient]struct{})
 	h.mu.Unlock()
+	metrics.SetWSClients(0)
 }
 
 func (h *WSHub) sendHandshake(conn *websocket.Conn, msg WSMessage) bool {
@@ -169,6 +171,7 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	h.clients[client] = struct{}{}
 	clientCount := len(h.clients)
 	h.mu.Unlock()
+	metrics.SetWSClients(clientCount)
 
 	h.logger.Info("ws client connected", "total", clientCount)
 
@@ -182,7 +185,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("ws handshake failed: welcome")
 		h.mu.Lock()
 		delete(h.clients, client)
+		clientCount = len(h.clients)
 		h.mu.Unlock()
+		metrics.SetWSClients(clientCount)
 		_ = conn.Close()
 		return
 	}
@@ -205,7 +210,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				h.logger.Warn("ws handshake failed: initial_state")
 				h.mu.Lock()
 				delete(h.clients, client)
+				clientCount = len(h.clients)
 				h.mu.Unlock()
+				metrics.SetWSClients(clientCount)
 				_ = conn.Close()
 				return
 			}
@@ -219,7 +226,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				h.logger.Warn("ws handshake failed: no_data_yet")
 				h.mu.Lock()
 				delete(h.clients, client)
+				clientCount = len(h.clients)
 				h.mu.Unlock()
+				metrics.SetWSClients(clientCount)
 				_ = conn.Close()
 				return
 			}
@@ -233,7 +242,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				_ = conn.Close()
 				h.mu.Lock()
 				delete(h.clients, client)
+				clientCount := len(h.clients)
 				h.mu.Unlock()
+				metrics.SetWSClients(clientCount)
 			})
 		}()
 
@@ -271,7 +282,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				_ = conn.Close()
 				h.mu.Lock()
 				delete(h.clients, client)
+				clientCount := len(h.clients)
 				h.mu.Unlock()
+				metrics.SetWSClients(clientCount)
 			})
 		}()
 
@@ -331,6 +344,7 @@ func (h *WSHub) Broadcast(msg WSMessage) {
 		case c.sendCh <- data:
 		default:
 			drops := c.dropCount.Add(1)
+			metrics.IncWSDrop()
 			if drops%100 == 1 {
 				c.logger.Warn("ws client too slow, dropping message",
 					"type", msg.Type,

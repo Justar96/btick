@@ -233,7 +233,8 @@ data:
         read_deadline_sec: 60
     database:
       dsn: "${DATABASE_URL}"
-      max_conns: 20
+      ingest_max_conns: 12
+      query_max_conns: 8
       run_migrations: true
     sources:
       - name: binance
@@ -374,7 +375,8 @@ server:
 
 database:
   dsn: "${DATABASE_URL}"      # Env var substitution supported
-  max_conns: 20               # Connection pool size
+  ingest_max_conns: 12        # Write-heavy ingest pool size
+  query_max_conns: 8          # API/read pool size
   run_migrations: true        # Auto-run migrations on startup
 
 sources:
@@ -502,7 +504,7 @@ curl https://your-app/v1/health/feeds
 psql $DATABASE_URL -c "SELECT 1"
 
 # Check pool exhaustion
-# Increase max_conns in config if needed
+# Increase ingest/query pool sizes in config if needed
 
 # SSL issues
 # Add ?sslmode=require or ?sslmode=disable as needed

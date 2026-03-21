@@ -23,7 +23,8 @@ See CLAUDE.md for the full pipeline diagram. Key throughput characteristics:
 | `trade_freshness_window_ms` | 2000 | 2000ms |
 | `late_arrival_grace_ms` | 250 | 250ms |
 | `carry_forward_max_seconds` | 10 | 10s |
-| `database.max_conns` | 20 | pgx default |
+| `database.ingest_max_conns` | 12 | 12 |
+| `database.query_max_conns` | 8 | 8 |
 | `ws.send_buffer_size` | 256 | 256 |
 
 ### Bottlenecks already addressed
@@ -39,6 +40,8 @@ These are already implemented in the current codebase:
 - **Snapshot DB batching**: finalized snapshots are queued for 10-row / 10s batched persistence without delaying WS broadcast (`snapshot.go`, `persistence.go`, `queries.go`).
 - **Snapshot writer shutdown draining**: snapshot/tick DB writers now drain after in-flight finalizers complete so batched writes are not lost on shutdown (`snapshot.go`, `persistence.go`).
 - **Normalizer dedup lock sharding**: duplicate detection is now partitioned by source so each shard has its own mutex and bounded ring buffer (`normalizer.go`).
+- **Raw tick COPY staging path**: the writer now uses a temp staging table plus `CopyFrom`/merge into `raw_ticks`, keeping `ON CONFLICT DO NOTHING` semantics while reducing row-by-row insert overhead (`writer.go`).
+- **Separate pgx pools**: startup now provisions distinct ingest and query pools, with write-heavy components bound to ingest and API handlers bound to query (`postgres.go`, `main.go`, `config.go`).
 - **Compression timing**: `raw_ticks` compressed after 2 hours (was 30 min); `canonical_ticks` compression removed (1-day retention makes it wasteful).
 - **Continuous aggregates**: `ohlcv_1m` (per-source 1-min candles) and `snapshot_rollups_1h` (hourly rollups) with Direct Compress.
 - **Raw tick schema cleanup**: `ingest_partition_date` is removed from the base schema/write path and `idx_raw_ticks_symbol_ts` is dropped in the migration (`001_init.sql`, `writer.go`).
@@ -49,10 +52,7 @@ These are already implemented in the current codebase:
 
 | Area | Issue | Impact |
 |------|-------|--------|
-| **Raw writer batch mode** | Uses `pgx.Batch` (pipelined individual INSERTs), not `CopyFrom` | Each row is a separate prepared statement execution; `CopyFrom` is 2-5x faster for bulk |
-| **Single pgx pool** | One pool (20 conns) shared by ingest writes, snapshot inserts, and API queries | Write spikes can starve read queries; no isolation |
 | **No exported metrics** | Channel drops, flush latency, snapshot backlog only logged, not metered | No alerting, no dashboards, no capacity planning |
-| **`raw_payload` JSONB on hot path** | Every raw_ticks row stores full exchange message as JSONB | TOAST overhead on insert; inflates WAL; rarely queried |
 
 ---
 
@@ -107,6 +107,8 @@ INSERT INTO raw_ticks SELECT * FROM _staging ON CONFLICT DO NOTHING;
 
 **Expected impact**: 2-3x reduction in raw tick write latency.
 
+**Status**: Implemented in `internal/storage/writer.go` with a per-flush temp staging table, `CopyFrom`, and `INSERT ... SELECT ... ON CONFLICT DO NOTHING` merge.
+
 #### E. Normalizer dedup lock sharding
 
 **Current**: `isDuplicate` in `normalizer.go` holds a single `sync.Mutex` protecting a 100k-entry `map[string]struct{}` and ring buffer.
@@ -132,7 +134,7 @@ type shardedDedup struct {
 
 #### F. Separate pgx pools for ingest vs. query
 
-**Current**: `NewDB` in `postgres.go` creates a single `pgxpool.Pool` with `max_conns: 20`.
+**Current**: startup provisions separate ingest/query pools, defaulting to `ingest_max_conns: 12` and `query_max_conns: 8`.
 
 **Fix**: Create two pools from the same DSN:
 - **Ingest pool**: 8-10 conns, optimized for write batches (higher `MaxConnLifetime`, prepared statements for INSERT/COPY).
@@ -144,22 +146,30 @@ Wire the writer and snapshot engine to the ingest pool; wire API handlers to the
 
 **Expected impact**: Eliminates write-spike starvation of API queries. Settlement query P99 latency improves.
 
+**Status**: Implemented in `internal/storage/postgres.go`, `internal/config/config.go`, `cmd/btick/main.go`, and config/docs surfaces.
+
 ### 2.3 Long-term (weeks, higher risk)
 
 #### G. Prometheus metrics export
 
-Add counters/histograms for:
-- `btick_channel_drops_total{channel="writer|engine|normalizer"}` — already tracked as int64, just export
-- `btick_writer_flush_duration_ms` — histogram of batch flush times
+Export counters, gauges, and histograms for:
+- `btick_channel_drops_total{channel="writer|engine|normalizer|tick_writer|snapshot_writer"}` — backpressure visibility across fan-out and DB write buffers
+- `btick_writer_flush_duration_seconds` — histogram of batch flush times
 - `btick_writer_batch_size` — histogram of rows per flush
-- `btick_snapshot_finalize_lag_ms` — gauge of `time.Now() - last_finalized_snapshot`
+- `btick_snapshot_finalize_lag_seconds` — gauge of `time.Now() - snapshotSecond`
 - `btick_pipeline_latency_ms` — histogram of `recv_ts - exchange_ts`
 - `btick_ws_clients` — gauge of connected WS clients
 - `btick_ws_drops_total` — counter of dropped WS messages
 
-**Tradeoff**: Adds `prometheus/client_golang` dependency. Requires `/metrics` endpoint.
+**Tradeoff**: Adds a lightweight in-process metrics registry and `/metrics` endpoint. This keeps
+the hot path additive without introducing a new external dependency in the current build
+environment.
 
 **Expected impact**: Enables alerting, capacity planning, and regression detection.
+
+**Status**: Implemented in `internal/metrics/`, `internal/api/server.go`, `internal/api/websocket.go`,
+`internal/storage/writer.go`, `internal/engine/snapshot.go`, `internal/normalizer/normalizer.go`,
+and `cmd/btick/main.go`.
 
 #### H. Lock-free fan-out ring buffer
 
@@ -183,7 +193,7 @@ Replace in-process channel fan-out with PostgreSQL logical replication or CDC (e
 
 ## 3. TimescaleDB Optimizations
 
-> **Note**: Items marked **(2.24.0)** require TimescaleDB 2.24.0+. The current schema header says 2.17+. If running <2.24.0, skip those items or plan an upgrade.
+> **Note**: This repository now targets TimescaleDB 2.24.0+. Items marked **(2.24.0)** rely on that baseline explicitly.
 
 ### 3.1 Schema improvements
 
@@ -199,9 +209,9 @@ Replace in-process channel fan-out with PostgreSQL logical replication or CDC (e
 
 **Status**: Implemented in `migrations/001_init.sql` and `internal/storage/writer.go`.
 
-#### B. Evaluate `raw_payload` JSONB storage strategy
+#### B. Move `raw_payload` off JSONB
 
-**Current**: Every raw tick stores the full exchange WebSocket message as JSONB (~200-500 bytes).
+**Current**: `raw_ticks.raw_payload` is now stored as `BYTEA`, and existing JSONB columns are converted in-place during migration after decompressing any compressed `raw_ticks` chunks.
 
 **Problem**: JSONB is parsed and validated on insert. Large payloads are TOASTed, adding I/O. With 2-5M rows/day and 1-day retention, this data is written, compressed, then dropped — rarely if ever queried.
 
@@ -212,6 +222,8 @@ Replace in-process channel fan-out with PostgreSQL logical replication or CDC (e
 4. **Keep as-is**: If audit queries on `raw_payload` are expected, the JSONB overhead is the cost of queryability.
 
 **Recommendation**: Option 1 (`BYTEA`) unless JSON path queries on raw payloads are a known requirement. The raw payload is already stored as `[]byte` in Go (`RawEvent.RawPayload`).
+
+**Status**: Implemented in `migrations/001_init.sql`. New installs create `BYTEA`, and existing JSONB columns are migrated with a fail-fast decompress-then-convert path using `raw_payload::text` → `BYTEA`.
 
 #### C. Drop `idx_raw_ticks_symbol_ts` index
 
@@ -227,7 +239,7 @@ Replace in-process channel fan-out with PostgreSQL logical replication or CDC (e
 
 ### 3.2 Compression setting refinements
 
-**raw_ticks — add bloom filter (2.24.0)**:
+**raw_ticks — add bloom filter (2.20+)**:
 ```sql
 ALTER TABLE raw_ticks SET (
     timescaledb.compress,
@@ -237,6 +249,8 @@ ALTER TABLE raw_ticks SET (
 );
 ```
 **Why**: `trade_id` is high-cardinality and sparse (NULL for ticker events). Bloom filter enables efficient exact-match lookups on compressed chunks without full decompression. Useful for `QueryRawTicks` debug queries filtering by trade.
+
+**Status**: Implemented in `migrations/001_init.sql` as part of the raw tick compression settings on `raw_ticks`.
 
 #### Lightning-fast recompression (2.24.0)
 
@@ -257,7 +271,7 @@ WHERE job_id IN (
 
 #### A. Direct Compress at creation time (2.24.0)
 
-**Current**: In `001_init.sql`, `ohlcv_1m` and `snapshot_rollups_1h` are created, then compression is enabled via a separate `ALTER MATERIALIZED VIEW ... SET (timescaledb.compress = true)`.
+**Current**: `001_init.sql` now creates `ohlcv_1m`, `snapshot_rollups_1h`, and `snapshot_rollups_1d` with `timescaledb.compress = true` in the `WITH` clause, while retaining protected `ALTER MATERIALIZED VIEW ... SET (timescaledb.compress = true)` statements for idempotent reruns.
 
 **2.24.0 improvement**: Use `timescaledb.compress = true` in the `WITH` clause at creation:
 ```sql
@@ -267,7 +281,7 @@ WITH (timescaledb.continuous, timescaledb.compress = true) AS
 ```
 This eliminates the intermediate materialized hypertable step and is functionally equivalent but cleaner.
 
-**Action**: Update migration for new deployments. Existing deployments are unaffected (the separate ALTER achieves the same result).
+**Status**: Implemented in `migrations/001_init.sql`. New deployments get direct-compress creation, while existing deployments keep the same end state via the preserved `ALTER` steps.
 
 #### B. Add `snapshot_rollups_1d` hierarchical aggregate
 
@@ -301,6 +315,8 @@ SELECT add_continuous_aggregate_policy('snapshot_rollups_1d',
 SELECT add_compression_policy('snapshot_rollups_1d', INTERVAL '30 days', if_not_exists => TRUE);
 ```
 **Why**: Dashboard queries spanning weeks/months hit the 1h aggregate (168 rows/week). A daily rollup reduces this to 7 rows/week. Compression after 30 days keeps storage minimal.
+
+**Status**: Implemented in `migrations/001_init.sql` as a compressed continuous aggregate layered on `snapshot_rollups_1h`.
 
 #### C. Add retention policies for continuous aggregates
 
@@ -368,18 +384,9 @@ Indexes are **not used** on compressed chunks. TimescaleDB uses:
 ```yaml
 database:
   dsn: "${DATABASE_URL}"
-  ingest_pool:
-    max_conns: 10
-    min_conns: 4
-    max_conn_lifetime: 3600     # 1 hour
-    max_conn_idle_time: 300     # 5 min
-    health_check_period: 30
-  query_pool:
-    max_conns: 8
-    min_conns: 2
-    max_conn_lifetime: 1800     # 30 min
-    max_conn_idle_time: 120     # 2 min
-    health_check_period: 30
+  ingest_max_conns: 12
+  query_max_conns: 8
+  run_migrations: true
 ```
 
 **PostgreSQL server-side**:
@@ -512,19 +519,19 @@ LIMIT 100;
 | # | Change | Impact | Risk | Files | Status |
 |---|--------|--------|------|-------|--------|
 | 6 | Normalizer dedup lock sharding | Eliminates serialization bottleneck | Medium (logic change) | `normalizer.go` | Done |
-| 7 | `CopyFrom` or staging-table merge for raw ticks | 2-3x faster raw tick ingestion | Medium (conflict handling) | `writer.go` | Pending |
-| 8 | Separate ingest/query pgx pools | Write-spike isolation, better query P99 | Medium (plumbing) | `postgres.go`, `config.go`, `main.go` | Pending |
-| 9 | Add `snapshot_rollups_1d` aggregate | Faster long-range dashboard queries | Low | `001_init.sql` or new migration | Pending |
-| 10 | Bloom filter on `raw_ticks.trade_id` (2.24.0) | Faster compressed-chunk trade lookups | Low (requires 2.24.0) | `001_init.sql` | Pending |
+| 7 | `CopyFrom` or staging-table merge for raw ticks | 2-3x faster raw tick ingestion | Medium (conflict handling) | `writer.go` | Done |
+| 8 | Separate ingest/query pgx pools | Write-spike isolation, better query P99 | Medium (plumbing) | `postgres.go`, `config.go`, `main.go` | Done |
+| 9 | Add `snapshot_rollups_1d` aggregate | Faster long-range dashboard queries | Low | `001_init.sql` or new migration | Done |
+| 10 | Bloom filter on `raw_ticks.trade_id` (2.20+) | Faster compressed-chunk trade lookups | Low (requires TimescaleDB support) | `001_init.sql` | Done |
 
 ### Phase 3: Longer-term (1-2 weeks)
 
-| # | Change | Impact | Risk | Files |
-|---|--------|--------|------|-------|
-| 11 | Prometheus metrics export | Observability, alerting, capacity planning | Low (additive) | New `internal/metrics/` package, `main.go` |
-| 12 | `raw_payload` → `BYTEA` | ~10-20% insert CPU savings | Medium (loses JSONB queryability) | `001_init.sql`, `writer.go`, `domain/types.go` |
-| 13 | Direct Compress at creation (2.24.0) | Cleaner migration, no functional change | Low (new deployments only) | `001_init.sql` |
-| 14 | PostgreSQL server-side tuning | Smoother WAL writes, better vacuum | Medium (requires DB access) | DB config |
+| # | Change | Impact | Risk | Files | Status |
+|---|--------|--------|------|-------|--------|
+| 11 | Prometheus metrics export | Observability, alerting, capacity planning | Low (additive) | `internal/metrics/`, `server.go`, `websocket.go`, `writer.go`, `snapshot.go`, `normalizer.go`, `main.go` | Done |
+| 12 | `raw_payload` → `BYTEA` | ~10-20% insert CPU savings | Medium (loses JSONB queryability) | `001_init.sql`, `writer.go`, `domain/types.go` | Done |
+| 13 | Direct Compress at creation (2.24.0) | Cleaner migration, no functional change | Low (new deployments only) | `001_init.sql` | Done |
+| 14 | PostgreSQL server-side tuning | Smoother WAL writes, better vacuum | Medium (requires DB access) | DB config | Pending |
 
 ---
 
@@ -535,10 +542,10 @@ LIMIT 100;
 | Metric | Type | Source | Target |
 |--------|------|--------|--------|
 | `btick_pipeline_latency_ms` | Histogram | `snapshot.go` latency stats | P50 < 50ms, P99 < 250ms |
-| `btick_writer_flush_duration_ms` | Histogram | `writer.go` flush timing | P99 < 50ms |
+| `btick_writer_flush_duration_seconds` | Histogram | `writer.go` flush timing | P99 < 0.05s |
 | `btick_writer_batch_size` | Histogram | `writer.go` batch length | Avg > 500 |
-| `btick_channel_drops_total` | Counter | fan-out, normalizer, engine | 0 under normal load |
-| `btick_snapshot_finalize_lag_ms` | Gauge | `snapshot.go` `time.Now() - snapshotSecond` | < 500ms |
+| `btick_channel_drops_total` | Counter | fan-out, normalizer, engine write buffers | 0 under normal load |
+| `btick_snapshot_finalize_lag_seconds` | Gauge | `snapshot.go` `time.Now() - snapshotSecond` | < 0.5s |
 | `btick_ws_clients` | Gauge | `websocket.go` client count | Informational |
 | `btick_ws_drops_total` | Counter | `websocket.go` dropCount | < 0.1% of messages |
 
@@ -636,7 +643,7 @@ go test -bench=BenchmarkPipeline -benchmem -timeout 60s ./internal/engine/...
 
 | Table | Segment By | Order By | Bloom Filter |
 |-------|------------|----------|--------------|
-| raw_ticks | source, symbol_canonical | exchange_ts DESC | trade_id (2.24.0) |
+| raw_ticks | source, symbol_canonical | exchange_ts DESC | trade_id |
 | snapshots_1s | canonical_symbol | ts_second DESC | None |
 
 ### Continuous Aggregates
@@ -645,7 +652,7 @@ go test -bench=BenchmarkPipeline -benchmem -timeout 60s ./internal/engine/...
 |-----------|--------|----------|-------------|-----------|
 | ohlcv_1m | raw_ticks | 1 minute | Yes (2h) | Base |
 | snapshot_rollups_1h | snapshots_1s | 1 hour | Yes (14d) | Base |
-| snapshot_rollups_1d | snapshot_rollups_1h | 1 day | Yes (30d) | L2 (proposed) |
+| snapshot_rollups_1d | snapshot_rollups_1h | 1 day | Yes (30d) | L2 |
 
 ### Policies
 
@@ -661,10 +668,10 @@ go test -bench=BenchmarkPipeline -benchmem -timeout 60s ./internal/engine/...
 ### TimescaleDB 2.24.0 Features Used
 
 - [ ] Lightning-fast recompression — automatic after upgrade; test late-arriving inserts
-- [x] Direct Compress with continuous aggregates — `ohlcv_1m`, `snapshot_rollups_1h` use compressed materialized views
+- [x] Direct Compress with continuous aggregates — `ohlcv_1m`, `snapshot_rollups_1h`, and `snapshot_rollups_1d` use compressed materialized views
 - [ ] UUIDv7 in continuous aggregates — not needed (no UUID columns in aggregates)
-- [ ] Bloom filter sparse indexes — proposed for `raw_ticks.trade_id`
+- [x] Bloom filter sparse indexes — enabled for `raw_ticks.trade_id` (available in TimescaleDB 2.20+)
 
-**TimescaleDB Version:** 2.17+ (minimum required); 2.24.0 recommended for bloom filters + recompression
+**TimescaleDB Version:** 2.24.0+ required
 **Verified At:** 2026-03-21
 <!-- TIMESCALEDB_IMPLEMENTATION:END -->

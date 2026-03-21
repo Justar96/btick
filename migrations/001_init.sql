@@ -19,12 +19,38 @@ CREATE TABLE IF NOT EXISTS raw_ticks (
     sequence              TEXT,
     bid                   NUMERIC(20,8),
     ask                   NUMERIC(20,8),
-    raw_payload           JSONB NOT NULL
+    raw_payload           BYTEA NOT NULL
 );
 
 SELECT create_hypertable('raw_ticks', 'exchange_ts',
     chunk_time_interval => INTERVAL '1 hour',
     if_not_exists => TRUE);
+
+DO $$
+DECLARE
+    compressed_chunk REGCLASS;
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'raw_ticks'
+          AND column_name = 'raw_payload'
+          AND data_type = 'jsonb'
+    ) THEN
+        FOR compressed_chunk IN
+            SELECT format('%I.%I', chunk_schema, chunk_name)::regclass
+            FROM timescaledb_information.chunks
+            WHERE hypertable_name = 'raw_ticks'
+              AND is_compressed
+        LOOP
+            PERFORM decompress_chunk(compressed_chunk);
+        END LOOP;
+
+        ALTER TABLE raw_ticks
+            ALTER COLUMN raw_payload TYPE BYTEA
+            USING convert_to(raw_payload::text, 'UTF8');
+    END IF;
+END $$;
 
 ALTER TABLE raw_ticks
     DROP COLUMN IF EXISTS ingest_partition_date;
@@ -43,9 +69,10 @@ DO $$ BEGIN
     ALTER TABLE raw_ticks SET (
         timescaledb.compress,
         timescaledb.compress_segmentby = 'source, symbol_canonical',
-        timescaledb.compress_orderby = 'exchange_ts DESC');
+        timescaledb.compress_orderby = 'exchange_ts DESC',
+        timescaledb.compress_bloomfilter = 'trade_id');
 EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'raw_ticks compression already configured: %', SQLERRM;
+    RAISE NOTICE 'raw_ticks compression already configured or bloom filter unsupported: %', SQLERRM;
 END $$;
 SELECT add_compression_policy('raw_ticks', INTERVAL '2 hours', if_not_exists => TRUE);
 SELECT add_retention_policy('raw_ticks', INTERVAL '1 day', if_not_exists => TRUE);
@@ -189,3 +216,35 @@ SELECT add_continuous_aggregate_policy('snapshot_rollups_1h',
     if_not_exists => TRUE);
 SELECT add_compression_policy('snapshot_rollups_1h', INTERVAL '14 days', if_not_exists => TRUE);
 SELECT add_retention_policy('snapshot_rollups_1h', INTERVAL '365 days', if_not_exists => TRUE);
+
+-- Daily rollups of hourly snapshot aggregates
+CREATE MATERIALIZED VIEW IF NOT EXISTS snapshot_rollups_1d
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', bucket) AS bucket,
+    canonical_symbol,
+    first(open, bucket) AS open,
+    max(high) AS high,
+    min(low) AS low,
+    last(close, bucket) AS close,
+    avg(avg_quality_score) AS avg_quality_score,
+    avg(avg_source_count)::NUMERIC(10,4) AS avg_source_count,
+    sum(snapshot_count) AS snapshot_count,
+    sum(stale_count) AS stale_count,
+    sum(degraded_count) AS degraded_count
+FROM snapshot_rollups_1h
+GROUP BY time_bucket('1 day', bucket), canonical_symbol
+WITH NO DATA;
+
+DO $$ BEGIN
+    ALTER MATERIALIZED VIEW snapshot_rollups_1d SET (timescaledb.compress = true);
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'snapshot_rollups_1d compression already configured: %', SQLERRM;
+END $$;
+ALTER MATERIALIZED VIEW snapshot_rollups_1d SET (timescaledb.materialized_only = false);
+SELECT add_continuous_aggregate_policy('snapshot_rollups_1d',
+    start_offset => INTERVAL '30 days',
+    end_offset => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour',
+    if_not_exists => TRUE);
+SELECT add_compression_policy('snapshot_rollups_1d', INTERVAL '30 days', if_not_exists => TRUE);

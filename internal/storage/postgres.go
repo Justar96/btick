@@ -22,12 +22,46 @@ type DB struct {
 
 // New creates a new DB connection pool.
 func New(ctx context.Context, cfg config.DatabaseConfig, logger *slog.Logger) (*DB, error) {
+	maxConns, _ := cfg.PoolMaxConns()
+	return newDB(ctx, cfg, maxConns, cfg.RunMigrations, logger, "storage")
+}
+
+// NewPools creates separate ingest and query pools from the same DSN.
+func NewPools(ctx context.Context, cfg config.DatabaseConfig, logger *slog.Logger) (*DB, *DB, error) {
+	ingestMaxConns, queryMaxConns := cfg.PoolMaxConns()
+
+	ingestDB, err := newDB(ctx, cfg, ingestMaxConns, cfg.RunMigrations, logger, "storage_ingest")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if queryMaxConns <= 0 {
+		return ingestDB, nil, nil
+	}
+
+	queryDB, err := newDB(ctx, cfg, queryMaxConns, false, logger, "storage_query")
+	if err != nil {
+		ingestDB.Close()
+		return nil, nil, err
+	}
+
+	return ingestDB, queryDB, nil
+}
+
+func newDB(
+	ctx context.Context,
+	cfg config.DatabaseConfig,
+	maxConns int32,
+	runMigrations bool,
+	logger *slog.Logger,
+	component string,
+) (*DB, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
-	if cfg.MaxConns > 0 {
-		poolCfg.MaxConns = cfg.MaxConns
+	if maxConns > 0 {
+		poolCfg.MaxConns = maxConns
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
@@ -40,9 +74,9 @@ func New(ctx context.Context, cfg config.DatabaseConfig, logger *slog.Logger) (*
 		return nil, fmt.Errorf("ping: %w", err)
 	}
 
-	db := &DB{Pool: pool, logger: logger.With("component", "storage")}
+	db := &DB{Pool: pool, logger: logger.With("component", component)}
 
-	if cfg.RunMigrations {
+	if runMigrations {
 		if err := db.runMigrations(ctx); err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("migrations: %w", err)

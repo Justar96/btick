@@ -4,10 +4,12 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/justar9/btick/internal/config"
 	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/metrics"
 )
 
 // Store abstracts the database queries used by API handlers.
@@ -49,7 +51,7 @@ func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, db Store, eng Eng
 	s := &Server{
 		httpAddr: httpAddr,
 		wsPath:   wsPath,
-		db:       db,
+		db:       normalizeStore(db),
 		engine:   eng,
 		wsHub:    NewWSHub(logger, wsCfg, eng.LatestState),
 		logger:   logger.With("component", "api"),
@@ -57,7 +59,23 @@ func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, db Store, eng Eng
 	return s
 }
 
-func (s *Server) Run(ctx context.Context) error {
+func normalizeStore(db Store) Store {
+	if db == nil {
+		return nil
+	}
+
+	value := reflect.ValueOf(db)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil
+		}
+	}
+
+	return db
+}
+
+func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// REST endpoints
@@ -68,12 +86,17 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/health/feeds", s.handleFeedHealth)
 	mux.HandleFunc("GET /v1/price/settlement", s.handleSettlement)
+	mux.Handle("GET /metrics", metrics.Handler())
 
 	// WebSocket
 	mux.HandleFunc("GET "+s.wsPath, s.wsHub.HandleWS)
 
 	// CORS + content-type middleware
-	handler := corsMiddleware(jsonMiddleware(mux))
+	return corsMiddleware(jsonMiddleware(mux))
+}
+
+func (s *Server) Run(ctx context.Context) error {
+	handler := s.handler()
 
 	s.srv = &http.Server{
 		Addr:         s.httpAddr,
@@ -160,7 +183,9 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 func jsonMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/metrics" {
+			w.Header().Set("Content-Type", "application/json")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

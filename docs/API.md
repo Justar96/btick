@@ -22,7 +22,7 @@ btick is a real-time Bitcoin price oracle service that aggregates prices from mu
 
 ## Transport
 
-- **Content-Type:** All responses are `application/json`
+- **Content-Type:** REST responses are `application/json`; `GET /metrics` is Prometheus text format
 - **CORS:** `Access-Control-Allow-Origin: *` — all origins permitted, `GET` and `OPTIONS` methods allowed
 - **Machine-readable spec:** See `openapi.yaml` for the full OpenAPI 3.0 schema
 
@@ -31,6 +31,23 @@ btick is a real-time Bitcoin price oracle service that aggregates prices from mu
 ## REST API Endpoints
 
 ### Health & Status
+
+#### GET /metrics
+
+Prometheus-compatible process metrics for drops, latencies, writer flushes, and WebSocket load.
+
+**Response:** `200 OK` with `Content-Type: text/plain; version=0.0.4; charset=utf-8`
+
+**Example metrics:**
+
+```text
+# HELP btick_writer_flush_duration_seconds Duration of raw writer batch flushes in seconds.
+# TYPE btick_writer_flush_duration_seconds histogram
+# HELP btick_ws_clients Currently connected WebSocket clients.
+# TYPE btick_ws_clients gauge
+```
+
+---
 
 #### GET /v1/health
 

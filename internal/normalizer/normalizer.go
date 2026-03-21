@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/metrics"
 )
 
 const defaultMaxSeen = 100000
@@ -79,6 +80,7 @@ func (n *Normalizer) process(evt domain.RawEvent) {
 	select {
 	case n.outCh <- evt:
 	default:
+		metrics.IncChannelDrop("normalizer")
 		n.logger.Warn("output channel full, dropping normalized event",
 			"source", evt.Source,
 			"trade_id", evt.TradeID,

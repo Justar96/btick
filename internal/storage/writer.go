@@ -9,7 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/metrics"
 )
+
+const rawTickStagingTable = "_raw_ticks_staging"
 
 const insertRawTickQuery = `INSERT INTO raw_ticks (
 	event_id, source, symbol_native, symbol_canonical,
@@ -18,6 +21,42 @@ const insertRawTickQuery = `INSERT INTO raw_ticks (
 	raw_payload
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 ON CONFLICT DO NOTHING`
+
+const createRawTickStagingTableQuery = `CREATE TEMP TABLE _raw_ticks_staging
+(LIKE raw_ticks INCLUDING DEFAULTS)
+ON COMMIT DROP`
+
+const mergeRawTickStagingQuery = `INSERT INTO raw_ticks (
+	event_id, source, symbol_native, symbol_canonical,
+	event_type, exchange_ts, recv_ts, price, size,
+	side, trade_id, sequence, bid, ask,
+	raw_payload
+)
+SELECT
+	event_id, source, symbol_native, symbol_canonical,
+	event_type, exchange_ts, recv_ts, price, size,
+	side, trade_id, sequence, bid, ask,
+	raw_payload
+FROM _raw_ticks_staging
+ON CONFLICT DO NOTHING`
+
+var rawTickCopyColumns = []string{
+	"event_id",
+	"source",
+	"symbol_native",
+	"symbol_canonical",
+	"event_type",
+	"exchange_ts",
+	"recv_ts",
+	"price",
+	"size",
+	"side",
+	"trade_id",
+	"sequence",
+	"bid",
+	"ask",
+	"raw_payload",
+}
 
 // Writer batches raw events and writes them to PostgreSQL.
 type Writer struct {
@@ -107,46 +146,13 @@ func (w *Writer) flush(ctx context.Context) {
 	defer w.putBatch(batch)
 
 	start := time.Now()
+	defer func() {
+		metrics.ObserveWriterFlush(len(batch), time.Since(start))
+	}()
 
-	var pgxBatch pgx.Batch
-	for _, e := range batch {
-		pgxBatch.Queue(insertRawTickQuery,
-			e.EventID,
-			e.Source,
-			e.SymbolNative,
-			e.SymbolCanonical,
-			e.EventType,
-			e.ExchangeTS,
-			e.RecvTS,
-			e.Price,
-			e.Size,
-			e.Side,
-			e.TradeID,
-			e.Sequence,
-			e.Bid,
-			e.Ask,
-			e.RawPayload,
-		)
-	}
-
-	results := w.db.Pool.SendBatch(ctx, &pgxBatch)
-	inserted := int64(0)
-	for range batch {
-		tag, err := results.Exec()
-		if err != nil {
-			_ = results.Close()
-			w.logger.Error("batched insert failed, falling back to individual inserts",
-				"error", err,
-				"batch_size", len(batch),
-			)
-			w.insertIndividually(ctx, batch)
-			return
-		}
-		inserted += tag.RowsAffected()
-	}
-
-	if err := results.Close(); err != nil {
-		w.logger.Error("batch close failed, falling back to individual inserts",
+	copied, inserted, err := w.copyThroughStaging(ctx, batch)
+	if err != nil {
+		w.logger.Error("copy/merge insert failed, falling back to individual inserts",
 			"error", err,
 			"batch_size", len(batch),
 		)
@@ -157,9 +163,76 @@ func (w *Writer) flush(ctx context.Context) {
 	elapsed := time.Since(start)
 	w.logger.Debug("batch flushed",
 		"rows", len(batch),
+		"copied", copied,
 		"inserted", inserted,
 		"elapsed", elapsed,
 	)
+}
+
+func (w *Writer) copyThroughStaging(ctx context.Context, batch []domain.RawEvent) (int64, int64, error) {
+	conn, err := w.db.Pool.Acquire(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		_ = tx.Rollback(context.Background())
+	}()
+
+	if _, err := tx.Exec(ctx, createRawTickStagingTableQuery); err != nil {
+		return 0, 0, err
+	}
+
+	copied, err := tx.CopyFrom(ctx,
+		pgx.Identifier{rawTickStagingTable},
+		rawTickCopyColumns,
+		rawTickCopySource(batch),
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	tag, err := tx.Exec(ctx, mergeRawTickStagingQuery)
+	if err != nil {
+		return copied, 0, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return copied, tag.RowsAffected(), err
+	}
+
+	return copied, tag.RowsAffected(), nil
+}
+
+func rawTickCopySource(batch []domain.RawEvent) pgx.CopyFromSource {
+	return pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
+		return rawTickCopyRow(batch[i]), nil
+	})
+}
+
+func rawTickCopyRow(e domain.RawEvent) []any {
+	return []any{
+		e.EventID,
+		e.Source,
+		e.SymbolNative,
+		e.SymbolCanonical,
+		e.EventType,
+		e.ExchangeTS,
+		e.RecvTS,
+		e.Price,
+		e.Size,
+		e.Side,
+		e.TradeID,
+		e.Sequence,
+		e.Bid,
+		e.Ask,
+		e.RawPayload,
+	}
 }
 
 func (w *Writer) insertIndividually(ctx context.Context, batch []domain.RawEvent) {

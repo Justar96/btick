@@ -14,6 +14,7 @@ import (
 
 	"github.com/justar9/btick/internal/config"
 	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/metrics"
 	"github.com/justar9/btick/internal/storage"
 )
 
@@ -295,6 +296,7 @@ func (e *SnapshotEngine) emitTick(evt domain.RawEvent) {
 		select {
 		case e.ticksToWrite <- tick:
 		default:
+			metrics.IncChannelDrop("tick_writer")
 			e.logger.Warn("canonical tick write buffer full, dropping")
 		}
 	}
@@ -385,12 +387,14 @@ func (e *SnapshotEngine) finalizeSnapshot(ctx context.Context, snapshotSecond ti
 		LastEventExchangeTS: lastEventTS,
 		FinalizedAt:         now,
 	}
+	metrics.SetSnapshotFinalizeLag(snapshot.FinalizedAt.Sub(snapshot.TSSecond))
 
 	// Queue DB persistence without delaying broadcasts.
 	if e.db != nil {
 		select {
 		case e.snapshotsToWrite <- snapshot:
 		default:
+			metrics.IncChannelDrop("snapshot_writer")
 			e.logger.Warn("snapshot write buffer full, dropping", "ts", snapshotSecond)
 		}
 	}
@@ -587,6 +591,7 @@ func (e *SnapshotEngine) recordPipelineLatency(evt domain.RawEvent) {
 	if lag < 0 || lag > maxPipelineLatency {
 		return
 	}
+	metrics.ObservePipelineLatency(lag)
 
 	lagMs := lag.Milliseconds()
 

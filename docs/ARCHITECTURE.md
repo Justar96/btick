@@ -396,7 +396,7 @@ Reconnect Attempt
 
 ### Data Integrity
 - UUIDs for all event IDs (UUID v7 for time-ordering)
-- JSONB raw payloads preserved for audit
+- Raw payload bytes preserved for audit
 - Source details stored with every snapshot
 
 ---
@@ -415,14 +415,14 @@ Reconnect Attempt
 ### Key Metrics to Monitor
 
 ```
-# Prometheus-style metrics (future)
-btc_price_tick_sources_active
-btc_price_tick_quality_score
-btc_price_tick_data_age_seconds
-btc_price_tick_reconnect_total
-btc_price_tick_events_processed_total
-btc_price_tick_snapshots_finalized_total
-btc_price_tick_ws_clients_connected
+# Exported at GET /metrics
+btick_channel_drops_total
+btick_writer_flush_duration_seconds
+btick_writer_batch_size
+btick_snapshot_finalize_lag_seconds
+btick_pipeline_latency_ms
+btick_ws_clients
+btick_ws_drops_total
 ```
 
 ### Alerting Recommendations
@@ -438,9 +438,8 @@ btc_price_tick_ws_clients_connected
 
 ## Future Enhancements
 
-1. **Prometheus metrics export** — `/metrics` endpoint
-2. **Additional exchanges** — OKX, Bybit, Gemini
-3. **Multiple symbols** — ETH/USD, SOL/USD
-4. **TimescaleDB integration** — Automatic partitioning
-5. **Signed attestations** — Cryptographic proof of prices
-6. **Chainlink integration** — On-chain price feeds
+1. **Additional exchanges** — OKX, Bybit, Gemini
+2. **Multiple symbols** — ETH/USD, SOL/USD
+3. **TimescaleDB integration** — Automatic partitioning
+4. **Signed attestations** — Cryptographic proof of prices
+5. **Chainlink integration** — On-chain price feeds
