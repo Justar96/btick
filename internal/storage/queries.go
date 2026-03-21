@@ -17,16 +17,16 @@ const insertCanonicalTickQuery = `INSERT INTO canonical_ticks (
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 ON CONFLICT DO NOTHING`
 
+const insertSnapshotQuery = `INSERT INTO snapshots_1s (
+	ts_second, canonical_symbol, canonical_price, basis,
+	is_stale, is_degraded, quality_score, source_count,
+	sources_used, source_details_json, last_event_exchange_ts, finalized_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+ON CONFLICT (ts_second) DO NOTHING`
+
 // InsertSnapshot writes a finalized 1-second snapshot.
 func (db *DB) InsertSnapshot(ctx context.Context, s domain.Snapshot1s) error {
-	const q = `INSERT INTO snapshots_1s (
-		ts_second, canonical_symbol, canonical_price, basis,
-		is_stale, is_degraded, quality_score, source_count,
-		sources_used, source_details_json, last_event_exchange_ts, finalized_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-	ON CONFLICT (ts_second) DO NOTHING`
-
-	_, err := db.Pool.Exec(ctx, q,
+	_, err := db.Pool.Exec(ctx, insertSnapshotQuery,
 		s.TSSecond, s.CanonicalSymbol, s.CanonicalPrice, s.Basis,
 		s.IsStale, s.IsDegraded, s.QualityScore, s.SourceCount,
 		s.SourcesUsed, s.SourceDetailsJSON, s.LastEventExchangeTS, s.FinalizedAt,
@@ -59,8 +59,30 @@ func (db *DB) InsertCanonicalTicks(ctx context.Context, ticks []domain.Canonical
 		)
 	}
 
-	results := db.Pool.SendBatch(ctx, &batch)
-	for range ticks {
+	return db.execBatch(ctx, &batch, len(ticks))
+}
+
+// InsertSnapshots writes finalized 1-second snapshots in a single batch.
+func (db *DB) InsertSnapshots(ctx context.Context, snapshots []domain.Snapshot1s) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	var batch pgx.Batch
+	for _, s := range snapshots {
+		batch.Queue(insertSnapshotQuery,
+			s.TSSecond, s.CanonicalSymbol, s.CanonicalPrice, s.Basis,
+			s.IsStale, s.IsDegraded, s.QualityScore, s.SourceCount,
+			s.SourcesUsed, s.SourceDetailsJSON, s.LastEventExchangeTS, s.FinalizedAt,
+		)
+	}
+
+	return db.execBatch(ctx, &batch, len(snapshots))
+}
+
+func (db *DB) execBatch(ctx context.Context, batch *pgx.Batch, rows int) error {
+	results := db.Pool.SendBatch(ctx, batch)
+	for range rows {
 		if _, err := results.Exec(); err != nil {
 			_ = results.Close()
 			return err

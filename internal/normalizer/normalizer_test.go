@@ -221,8 +221,6 @@ func TestNormalizer_RingBufferEviction(t *testing.T) {
 		inCh:    inCh,
 		outCh:   outCh,
 		logger:  testLogger(),
-		seen:    make(map[string]struct{}, 10),
-		order:   make([]string, 10),
 		maxSeen: 10,
 	}
 
@@ -431,8 +429,6 @@ func TestMapCanonicalSymbol(t *testing.T) {
 
 func TestIsDuplicate(t *testing.T) {
 	n := &Normalizer{
-		seen:    make(map[string]struct{}, 100),
-		order:   make([]string, 100),
 		maxSeen: 100,
 	}
 

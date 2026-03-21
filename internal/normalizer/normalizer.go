@@ -3,6 +3,7 @@ package normalizer
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -10,29 +11,38 @@ import (
 	"github.com/justar9/btick/internal/domain"
 )
 
+const defaultMaxSeen = 100000
+
+type dedupShard struct {
+	mu         sync.Mutex
+	seen       map[string]struct{}
+	order      []string
+	head       int
+	maxEntries int
+}
+
 // Normalizer receives raw events from adapters, assigns UUIDs, deduplicates, and forwards.
 type Normalizer struct {
-	inCh    <-chan domain.RawEvent
-	outCh   chan<- domain.RawEvent
-	logger  *slog.Logger
+	inCh   <-chan domain.RawEvent
+	outCh  chan<- domain.RawEvent
+	logger *slog.Logger
 
-	// Dedup: bounded LRU of (source, trade_id)
-	mu      sync.Mutex
-	seen    map[string]struct{}
-	order   []string
-	head    int       // ring buffer head
+	// Dedup: per-source bounded LRU of (source, trade_id)
+	shards  sync.Map // map[string]*dedupShard
 	maxSeen int
 }
 
 func New(inCh <-chan domain.RawEvent, outCh chan<- domain.RawEvent, logger *slog.Logger) *Normalizer {
-	return &Normalizer{
+	n := &Normalizer{
 		inCh:    inCh,
 		outCh:   outCh,
 		logger:  logger.With("component", "normalizer"),
-		seen:    make(map[string]struct{}, 100000),
-		order:   make([]string, 100000), // Pre-allocate full size for ring buffer
-		maxSeen: 100000,
+		maxSeen: defaultMaxSeen,
 	}
+	for _, source := range [...]string{"binance", "coinbase", "kraken"} {
+		n.shards.Store(source, newDedupShard(n.maxSeen))
+	}
+	return n
 }
 
 func (n *Normalizer) Run(ctx context.Context) {
@@ -77,26 +87,58 @@ func (n *Normalizer) process(evt domain.RawEvent) {
 }
 
 func (n *Normalizer) isDuplicate(key string) bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+	shard := n.dedupShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	if _, exists := n.seen[key]; exists {
+	if _, exists := shard.seen[key]; exists {
 		return true
 	}
 
 	// Evict oldest entry if over limit
-	if len(n.seen) >= n.maxSeen {
-		oldest := n.order[n.head]
+	if len(shard.seen) >= shard.maxEntries {
+		oldest := shard.order[shard.head]
 		if oldest != "" {
-			delete(n.seen, oldest)
+			delete(shard.seen, oldest)
 		}
 	}
 
-	n.seen[key] = struct{}{}
-	n.order[n.head] = key
-	n.head = (n.head + 1) % n.maxSeen
+	shard.seen[key] = struct{}{}
+	shard.order[shard.head] = key
+	shard.head = (shard.head + 1) % shard.maxEntries
 
 	return false
+}
+
+func newDedupShard(maxEntries int) *dedupShard {
+	if maxEntries <= 0 {
+		maxEntries = defaultMaxSeen
+	}
+
+	return &dedupShard{
+		seen:       make(map[string]struct{}, maxEntries),
+		order:      make([]string, maxEntries),
+		maxEntries: maxEntries,
+	}
+}
+
+func (n *Normalizer) dedupShard(key string) *dedupShard {
+	source := dedupSource(key)
+	if shard, ok := n.shards.Load(source); ok {
+		return shard.(*dedupShard)
+	}
+
+	shard := newDedupShard(n.maxSeen)
+	actual, _ := n.shards.LoadOrStore(source, shard)
+	return actual.(*dedupShard)
+}
+
+func dedupSource(key string) string {
+	source, _, found := strings.Cut(key, ":")
+	if found && source != "" {
+		return source
+	}
+	return key
 }
 
 func mapCanonicalSymbol(source, native string) string {

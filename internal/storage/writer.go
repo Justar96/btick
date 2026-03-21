@@ -15,16 +15,17 @@ const insertRawTickQuery = `INSERT INTO raw_ticks (
 	event_id, source, symbol_native, symbol_canonical,
 	event_type, exchange_ts, recv_ts, price, size,
 	side, trade_id, sequence, bid, ask,
-	raw_payload, ingest_partition_date
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+	raw_payload
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 ON CONFLICT DO NOTHING`
 
 // Writer batches raw events and writes them to PostgreSQL.
 type Writer struct {
-	db       *DB
-	logger   *slog.Logger
-	maxRows  int
-	maxDelay time.Duration
+	db        *DB
+	logger    *slog.Logger
+	maxRows   int
+	maxDelay  time.Duration
+	batchPool sync.Pool
 
 	mu        sync.Mutex
 	batch     []domain.RawEvent
@@ -32,14 +33,29 @@ type Writer struct {
 }
 
 func NewWriter(db *DB, maxRows int, maxDelay time.Duration, logger *slog.Logger) *Writer {
-	return &Writer{
+	writer := &Writer{
 		db:        db,
 		logger:    logger.With("component", "writer"),
 		maxRows:   maxRows,
 		maxDelay:  maxDelay,
-		batch:     make([]domain.RawEvent, 0, maxRows),
 		lastFlush: time.Now(),
 	}
+	writer.batchPool.New = func() any {
+		batch := make([]domain.RawEvent, 0, maxRows)
+		return &batch
+	}
+	writer.batch = writer.getBatch()
+	return writer
+}
+
+func (w *Writer) getBatch() []domain.RawEvent {
+	return (*w.batchPool.Get().(*[]domain.RawEvent))[:0]
+}
+
+func (w *Writer) putBatch(batch []domain.RawEvent) {
+	clear(batch)
+	batch = batch[:0]
+	w.batchPool.Put(&batch)
 }
 
 // Run consumes events from inCh and writes them in batches.
@@ -85,9 +101,10 @@ func (w *Writer) flush(ctx context.Context) {
 		return
 	}
 	batch := w.batch
-	w.batch = make([]domain.RawEvent, 0, w.maxRows)
+	w.batch = w.getBatch()
 	w.lastFlush = time.Now()
 	w.mu.Unlock()
+	defer w.putBatch(batch)
 
 	start := time.Now()
 
@@ -109,7 +126,6 @@ func (w *Writer) flush(ctx context.Context) {
 			e.Bid,
 			e.Ask,
 			e.RawPayload,
-			e.ExchangeTS.Format("2006-01-02"),
 		)
 	}
 
@@ -153,7 +169,7 @@ func (w *Writer) insertIndividually(ctx context.Context, batch []domain.RawEvent
 			e.EventID, e.Source, e.SymbolNative, e.SymbolCanonical,
 			e.EventType, e.ExchangeTS, e.RecvTS, e.Price, e.Size,
 			e.Side, e.TradeID, e.Sequence, e.Bid, e.Ask,
-			e.RawPayload, e.ExchangeTS.Format("2006-01-02"),
+			e.RawPayload,
 		)
 		if err != nil {
 			w.logger.Error("individual insert failed",

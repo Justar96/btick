@@ -19,16 +19,17 @@ CREATE TABLE IF NOT EXISTS raw_ticks (
     sequence              TEXT,
     bid                   NUMERIC(20,8),
     ask                   NUMERIC(20,8),
-    raw_payload           JSONB NOT NULL,
-    ingest_partition_date DATE NOT NULL DEFAULT CURRENT_DATE
+    raw_payload           JSONB NOT NULL
 );
 
 SELECT create_hypertable('raw_ticks', 'exchange_ts',
     chunk_time_interval => INTERVAL '1 hour',
     if_not_exists => TRUE);
 
-CREATE INDEX IF NOT EXISTS idx_raw_ticks_symbol_ts
-    ON raw_ticks (symbol_canonical, exchange_ts DESC);
+ALTER TABLE raw_ticks
+    DROP COLUMN IF EXISTS ingest_partition_date;
+
+DROP INDEX IF EXISTS idx_raw_ticks_symbol_ts;
 
 DO $$ BEGIN
     CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_ticks_source_trade
@@ -147,12 +148,14 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'ohlcv_1m compression already configured: %', SQLERRM;
 END $$;
 ALTER MATERIALIZED VIEW ohlcv_1m SET (timescaledb.materialized_only = false);
+SELECT remove_continuous_aggregate_policy('ohlcv_1m', if_exists => TRUE);
 SELECT add_continuous_aggregate_policy('ohlcv_1m',
-    start_offset => INTERVAL '1 hour',
+    start_offset => INTERVAL '3 hours',
     end_offset => INTERVAL '1 minute',
     schedule_interval => INTERVAL '1 minute',
     if_not_exists => TRUE);
 SELECT add_compression_policy('ohlcv_1m', INTERVAL '2 hours', if_not_exists => TRUE);
+SELECT add_retention_policy('ohlcv_1m', INTERVAL '30 days', if_not_exists => TRUE);
 
 -- Hourly rollups of 1-second snapshots
 CREATE MATERIALIZED VIEW IF NOT EXISTS snapshot_rollups_1h
@@ -185,3 +188,4 @@ SELECT add_continuous_aggregate_policy('snapshot_rollups_1h',
     schedule_interval => INTERVAL '5 minutes',
     if_not_exists => TRUE);
 SELECT add_compression_policy('snapshot_rollups_1h', INTERVAL '14 days', if_not_exists => TRUE);
+SELECT add_retention_policy('snapshot_rollups_1h', INTERVAL '365 days', if_not_exists => TRUE);
