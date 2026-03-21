@@ -158,7 +158,7 @@ func (m *mockWSServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Echo messages back
 	for {

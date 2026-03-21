@@ -140,7 +140,7 @@ func (a *BaseAdapter) connectAndRead(ctx context.Context) error {
 	// Send subscribe messages
 	if a.onConnected != nil {
 		if err := a.onConnected(conn); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			a.setConnState("disconnected")
 			return fmt.Errorf("subscribe: %w", err)
 		}
@@ -178,7 +178,7 @@ func (a *BaseAdapter) connectAndRead(ctx context.Context) error {
 			select {
 			case <-time.After(a.maxConnLifetime):
 				a.logger.Info("max connection lifetime reached, closing")
-				conn.Close()
+				_ = conn.Close()
 			case <-connCtx.Done():
 			}
 		}()
@@ -192,7 +192,7 @@ func (a *BaseAdapter) connectAndRead(ctx context.Context) error {
 		now := time.Now()
 		if nextDeadlineRefresh.IsZero() || now.After(nextDeadlineRefresh) {
 			if err := conn.SetReadDeadline(now.Add(readTimeout)); err != nil {
-				conn.Close()
+				_ = conn.Close()
 				a.setConnState("disconnected")
 				return fmt.Errorf("set read deadline: %w", err)
 			}
@@ -203,7 +203,7 @@ func (a *BaseAdapter) connectAndRead(ctx context.Context) error {
 		recvTS := time.Now()
 
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			a.setConnState("disconnected")
 			if ctx.Err() != nil || connCtx.Err() != nil {
 				return ctx.Err()

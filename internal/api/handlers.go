@@ -26,7 +26,7 @@ func (s *Server) handleLatest(w http.ResponseWriter, r *http.Request) {
 		"sources_used":  latest.SourcesUsed,
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, resp)
 }
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +84,7 @@ func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 	if resp == nil {
 		resp = []map[string]interface{}{}
 	}
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, resp)
 }
 
 func (s *Server) handleTicks(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +125,7 @@ func (s *Server) handleTicks(w http.ResponseWriter, r *http.Request) {
 	if resp == nil {
 		resp = []map[string]interface{}{}
 	}
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, resp)
 }
 
 func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +189,7 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	if resp == nil {
 		resp = []map[string]interface{}{}
 	}
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, resp)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -214,7 +214,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp["source_count"] = latest.SourceCount
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, resp)
 }
 
 func (s *Server) handleSettlement(w http.ResponseWriter, r *http.Request) {
@@ -285,7 +285,7 @@ func (s *Server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 		"source_details": snapshot.SourceDetailsJSON,
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, resp)
 }
 
 func (s *Server) handleFeedHealth(w http.ResponseWriter, r *http.Request) {
@@ -326,5 +326,11 @@ func (s *Server) handleFeedHealth(w http.ResponseWriter, r *http.Request) {
 	if resp == nil {
 		resp = []map[string]interface{}{}
 	}
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, resp)
+}
+
+func (s *Server) writeJSON(w http.ResponseWriter, v interface{}) {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		s.logger.Error("encode response", "err", err)
+	}
 }

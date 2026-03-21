@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"log/slog"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -827,10 +825,3 @@ func TestSnapshotEngine_TickWriteBuffer_Backpressure(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Helper for tests
-// =============================================================================
-
-func silentLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 100}))
-}

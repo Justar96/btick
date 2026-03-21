@@ -134,10 +134,21 @@ func (h *WSHub) shutdownClients() {
 	h.mu.Lock()
 	for c := range h.clients {
 		close(c.sendCh)
-		c.conn.Close()
+		_ = c.conn.Close()
 	}
 	h.clients = make(map[*wsClient]struct{})
 	h.mu.Unlock()
+}
+
+func (h *WSHub) sendHandshake(conn *websocket.Conn, msg WSMessage) bool {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return false
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return false
+	}
+	return conn.WriteMessage(websocket.TextMessage, data) == nil
 }
 
 func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
@@ -167,9 +178,13 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		TS:      time.Now().UTC().Format(time.RFC3339Nano),
 		Message: "btick/v1",
 	}
-	if data, err := json.Marshal(welcome); err == nil {
-		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		conn.WriteMessage(websocket.TextMessage, data)
+	if !h.sendHandshake(conn, welcome) {
+		h.logger.Warn("ws handshake failed: welcome")
+		h.mu.Lock()
+		delete(h.clients, client)
+		h.mu.Unlock()
+		_ = conn.Close()
+		return
 	}
 
 	// Send initial state.
@@ -186,9 +201,13 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				SourcesUsed:  state.SourcesUsed,
 				Message:      "initial_state",
 			}
-			if data, err := json.Marshal(initMsg); err == nil {
-				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				conn.WriteMessage(websocket.TextMessage, data)
+			if !h.sendHandshake(conn, initMsg) {
+				h.logger.Warn("ws handshake failed: initial_state")
+				h.mu.Lock()
+				delete(h.clients, client)
+				h.mu.Unlock()
+				_ = conn.Close()
+				return
 			}
 		} else {
 			noData := WSMessage{
@@ -196,9 +215,13 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				TS:      time.Now().UTC().Format(time.RFC3339Nano),
 				Message: "no_data_yet",
 			}
-			if data, err := json.Marshal(noData); err == nil {
-				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				conn.WriteMessage(websocket.TextMessage, data)
+			if !h.sendHandshake(conn, noData) {
+				h.logger.Warn("ws handshake failed: no_data_yet")
+				h.mu.Lock()
+				delete(h.clients, client)
+				h.mu.Unlock()
+				_ = conn.Close()
+				return
 			}
 		}
 	}
@@ -207,7 +230,7 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			client.closeOnce.Do(func() {
-				conn.Close()
+				_ = conn.Close()
 				h.mu.Lock()
 				delete(h.clients, client)
 				h.mu.Unlock()
@@ -221,15 +244,19 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			select {
 			case msg, ok := <-client.sendCh:
 				if !ok {
-					conn.WriteMessage(websocket.CloseMessage, nil)
+					_ = conn.WriteMessage(websocket.CloseMessage, nil)
 					return
 				}
-				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+					return
+				}
 				if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 					return
 				}
 			case <-pingTicker.C:
-				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					return
+				}
 				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
@@ -241,7 +268,7 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			client.closeOnce.Do(func() {
-				conn.Close()
+				_ = conn.Close()
 				h.mu.Lock()
 				delete(h.clients, client)
 				h.mu.Unlock()
@@ -249,10 +276,11 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		conn.SetReadLimit(4096)
-		conn.SetReadDeadline(time.Now().Add(h.wsCfg.ReadDeadline()))
+		if err := conn.SetReadDeadline(time.Now().Add(h.wsCfg.ReadDeadline())); err != nil {
+			return
+		}
 		conn.SetPongHandler(func(string) error {
-			conn.SetReadDeadline(time.Now().Add(h.wsCfg.ReadDeadline()))
-			return nil
+			return conn.SetReadDeadline(time.Now().Add(h.wsCfg.ReadDeadline()))
 		})
 
 		for {

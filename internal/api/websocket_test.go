@@ -31,6 +31,27 @@ func testHubWithState(state *domain.LatestState) *WSHub {
 	return NewWSHub(testLogger(), config.WSConfig{}, func() *domain.LatestState { return state })
 }
 
+func mustSetReadDeadline(t *testing.T, conn *websocket.Conn, d time.Duration) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(d)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+}
+
+func mustUnmarshalWS(t *testing.T, data []byte, v interface{}) {
+	t.Helper()
+	if err := json.Unmarshal(data, v); err != nil {
+		t.Fatalf("unmarshal ws message: %v", err)
+	}
+}
+
+func mustWriteMessage(t *testing.T, conn *websocket.Conn, msgType int, data []byte) {
+	t.Helper()
+	if err := conn.WriteMessage(msgType, data); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+}
+
 // =============================================================================
 // WSHub Basic Tests
 // =============================================================================
@@ -67,7 +88,7 @@ func TestWSHub_ClientConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
@@ -97,7 +118,7 @@ func TestWSHub_ClientDisconnect(t *testing.T) {
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
 
-	conn.Close()
+	_ = conn.Close()
 
 	// Wait for cleanup
 	time.Sleep(100 * time.Millisecond)
@@ -123,7 +144,7 @@ func TestWSHub_BroadcastToClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
@@ -137,7 +158,7 @@ func TestWSHub_BroadcastToClient(t *testing.T) {
 	})
 
 	// Read message
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	mustSetReadDeadline(t, conn, time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read error: %v", err)
@@ -174,7 +195,7 @@ func TestWSHub_MultipleClients(t *testing.T) {
 	}
 	defer func() {
 		for _, c := range conns {
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 
@@ -193,7 +214,7 @@ func TestWSHub_MultipleClients(t *testing.T) {
 	})
 
 	for i, conn := range conns {
-		conn.SetReadDeadline(time.Now().Add(time.Second))
+		mustSetReadDeadline(t, conn, time.Second)
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			t.Errorf("client %d read error: %v", i, err)
@@ -221,10 +242,10 @@ func TestWSHub_WelcomeMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// First message should be welcome
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	mustSetReadDeadline(t, conn, time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read error: %v", err)
@@ -269,11 +290,11 @@ func TestWSHub_InitialState_WithData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Skip welcome
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	conn.ReadMessage()
+	mustSetReadDeadline(t, conn, time.Second)
+	_, _, _ = conn.ReadMessage()
 
 	// Second message should be initial state
 	_, msg, err := conn.ReadMessage()
@@ -315,11 +336,11 @@ func TestWSHub_InitialState_NoData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Skip welcome
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	conn.ReadMessage()
+	mustSetReadDeadline(t, conn, time.Second)
+	_, _, _ = conn.ReadMessage()
 
 	// Second message should be no_data_yet
 	_, msg, err := conn.ReadMessage()
@@ -353,23 +374,23 @@ func TestWSHub_InitialState_NilGetState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Should get welcome only
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	mustSetReadDeadline(t, conn, time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read error: %v", err)
 	}
 
 	var wsMsg WSMessage
-	json.Unmarshal(msg, &wsMsg)
+	mustUnmarshalWS(t, msg, &wsMsg)
 	if wsMsg.Type != "welcome" {
 		t.Errorf("expected welcome, got %q", wsMsg.Type)
 	}
 
 	// Next read should timeout (no initial state sent)
-	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	mustSetReadDeadline(t, conn, 200*time.Millisecond)
 	_, _, err = conn.ReadMessage()
 	if err == nil {
 		t.Error("expected timeout with no initial state message")
@@ -392,7 +413,7 @@ func TestWSHub_SequenceNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
@@ -408,14 +429,14 @@ func TestWSHub_SequenceNumbers(t *testing.T) {
 			Price: "84100.00",
 		})
 
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		mustSetReadDeadline(t, conn, 2*time.Second)
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read error on message %d: %v", i, err)
 		}
 
 		var wsMsg WSMessage
-		json.Unmarshal(msg, &wsMsg)
+		mustUnmarshalWS(t, msg, &wsMsg)
 
 		if wsMsg.Seq == 0 {
 			t.Errorf("message %d should have non-zero seq", i)
@@ -443,7 +464,7 @@ func TestWSHub_Subscribe_DefaultAllOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
@@ -453,13 +474,13 @@ func TestWSHub_Subscribe_DefaultAllOn(t *testing.T) {
 	hub.Broadcast(WSMessage{Type: "latest_price", Price: "84200.00"})
 
 	for _, expected := range []string{"snapshot_1s", "latest_price"} {
-		conn.SetReadDeadline(time.Now().Add(time.Second))
+		mustSetReadDeadline(t, conn, time.Second)
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("expected to receive %s: %v", expected, err)
 		}
 		var wsMsg WSMessage
-		json.Unmarshal(msg, &wsMsg)
+		mustUnmarshalWS(t, msg, &wsMsg)
 		if wsMsg.Type != expected {
 			t.Errorf("expected type %q, got %q", expected, wsMsg.Type)
 		}
@@ -478,7 +499,7 @@ func TestWSHub_Unsubscribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
@@ -488,7 +509,7 @@ func TestWSHub_Unsubscribe(t *testing.T) {
 		Action: "unsubscribe",
 		Types:  []string{"snapshot_1s"},
 	})
-	conn.WriteMessage(websocket.TextMessage, unsubMsg)
+	mustWriteMessage(t, conn, websocket.TextMessage, unsubMsg)
 
 	// Give the reader goroutine time to process
 	time.Sleep(50 * time.Millisecond)
@@ -498,14 +519,14 @@ func TestWSHub_Unsubscribe(t *testing.T) {
 	hub.Broadcast(WSMessage{Type: "latest_price", Price: "84200.00"})
 
 	// Should only receive latest_price
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	mustSetReadDeadline(t, conn, time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read error: %v", err)
 	}
 
 	var wsMsg WSMessage
-	json.Unmarshal(msg, &wsMsg)
+	mustUnmarshalWS(t, msg, &wsMsg)
 	if wsMsg.Type != "latest_price" {
 		t.Errorf("expected 'latest_price' (snapshot_1s unsubscribed), got %q", wsMsg.Type)
 	}
@@ -523,7 +544,7 @@ func TestWSHub_Resubscribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
@@ -533,7 +554,7 @@ func TestWSHub_Resubscribe(t *testing.T) {
 		Action: "unsubscribe",
 		Types:  []string{"snapshot_1s"},
 	})
-	conn.WriteMessage(websocket.TextMessage, unsubMsg)
+	mustWriteMessage(t, conn, websocket.TextMessage, unsubMsg)
 	time.Sleep(50 * time.Millisecond)
 
 	// Re-subscribe
@@ -541,20 +562,20 @@ func TestWSHub_Resubscribe(t *testing.T) {
 		Action: "subscribe",
 		Types:  []string{"snapshot_1s"},
 	})
-	conn.WriteMessage(websocket.TextMessage, subMsg)
+	mustWriteMessage(t, conn, websocket.TextMessage, subMsg)
 	time.Sleep(50 * time.Millisecond)
 
 	// Should receive snapshot_1s again
 	hub.Broadcast(WSMessage{Type: "snapshot_1s", Price: "84100.00"})
 
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	mustSetReadDeadline(t, conn, time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read error: %v", err)
 	}
 
 	var wsMsg WSMessage
-	json.Unmarshal(msg, &wsMsg)
+	mustUnmarshalWS(t, msg, &wsMsg)
 	if wsMsg.Type != "snapshot_1s" {
 		t.Errorf("expected 'snapshot_1s' after resubscribe, got %q", wsMsg.Type)
 	}
@@ -583,20 +604,20 @@ func TestWSHub_Heartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + no_data_yet
 	drainMessages(t, conn, 2)
 
 	// Wait for heartbeat (should arrive within ~1.5s)
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	mustSetReadDeadline(t, conn, 3*time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("expected heartbeat: %v", err)
 	}
 
 	var wsMsg WSMessage
-	json.Unmarshal(msg, &wsMsg)
+	mustUnmarshalWS(t, msg, &wsMsg)
 	if wsMsg.Type != "heartbeat" {
 		t.Errorf("expected type 'heartbeat', got %q", wsMsg.Type)
 	}
@@ -627,7 +648,7 @@ func TestWSHub_Heartbeat_Unsubscribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + no_data_yet
 	drainMessages(t, conn, 2)
@@ -637,11 +658,11 @@ func TestWSHub_Heartbeat_Unsubscribe(t *testing.T) {
 		Action: "unsubscribe",
 		Types:  []string{"heartbeat"},
 	})
-	conn.WriteMessage(websocket.TextMessage, unsubMsg)
+	mustWriteMessage(t, conn, websocket.TextMessage, unsubMsg)
 	time.Sleep(50 * time.Millisecond)
 
 	// Should NOT receive heartbeat
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	mustSetReadDeadline(t, conn, 2*time.Second)
 	_, _, err = conn.ReadMessage()
 	if err == nil {
 		t.Error("expected timeout — heartbeat should not arrive when unsubscribed")
@@ -715,7 +736,7 @@ func TestWSHub_PingPong(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// The gorilla client automatically responds to pings with pongs.
 	// The server's pong handler resets the read deadline.
@@ -727,7 +748,7 @@ func TestWSHub_PingPong(t *testing.T) {
 
 	// Connection should still be alive — broadcast a message and receive it
 	hub.Broadcast(WSMessage{Type: "latest_price", Price: "84100.00"})
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	mustSetReadDeadline(t, conn, 2*time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("connection should be alive after ping/pong: %v", err)
@@ -773,20 +794,20 @@ func TestWSHub_Subscribe_UnknownAction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	drainMessages(t, conn, 2)
 
 	// Send unknown action — should be silently ignored
-	conn.WriteMessage(websocket.TextMessage, []byte(`{"action":"reset","types":["all"]}`))
+	mustWriteMessage(t, conn, websocket.TextMessage, []byte(`{"action":"reset","types":["all"]}`))
 	// Send garbage — should be silently ignored
-	conn.WriteMessage(websocket.TextMessage, []byte(`not json`))
+	mustWriteMessage(t, conn, websocket.TextMessage, []byte(`not json`))
 
 	time.Sleep(50 * time.Millisecond)
 
 	// Client should still work
 	hub.Broadcast(WSMessage{Type: "latest_price", Price: "84100.00"})
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	mustSetReadDeadline(t, conn, time.Second)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("client should still receive messages: %v", err)
@@ -816,7 +837,7 @@ func TestWSHub_HighFrequencyBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Drain welcome + initial state
 	drainMessages(t, conn, 2)
@@ -829,7 +850,9 @@ func TestWSHub_HighFrequencyBroadcast(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for {
-			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				return
+			}
 			_, _, err := conn.ReadMessage()
 			if err != nil {
 				return
@@ -846,7 +869,7 @@ func TestWSHub_HighFrequencyBroadcast(t *testing.T) {
 	}
 
 	time.Sleep(time.Second)
-	conn.Close()
+	_ = conn.Close()
 	wg.Wait()
 
 	count := atomic.LoadInt64(&received)
@@ -871,14 +894,14 @@ func TestWSHub_SlowClient_DoesNotBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer slowConn.Close()
+	defer func() { _ = slowConn.Close() }()
 
 	// Connect fast client
 	fastConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
-	defer fastConn.Close()
+	defer func() { _ = fastConn.Close() }()
 
 	// Drain welcome + initial state from fast client
 	drainMessages(t, fastConn, 2)
@@ -903,7 +926,7 @@ func TestWSHub_SlowClient_DoesNotBlock(t *testing.T) {
 	}
 
 	// Fast client should still receive messages
-	fastConn.SetReadDeadline(time.Now().Add(time.Second))
+	mustSetReadDeadline(t, fastConn, time.Second)
 	_, _, err = fastConn.ReadMessage()
 	if err != nil {
 		t.Errorf("fast client should receive messages: %v", err)
@@ -953,7 +976,7 @@ func TestWSHub_ManyClientsConnect(t *testing.T) {
 	// Cleanup
 	mu.Lock()
 	for _, c := range conns {
-		c.Close()
+		_ = c.Close()
 	}
 	mu.Unlock()
 
@@ -1010,7 +1033,9 @@ func TestWSHub_GracefulShutdown(t *testing.T) {
 	for _, conn := range conns {
 		// Drain any pending welcome/initial state, then verify connection is closed
 		for {
-			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			if err := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+				break
+			}
 			_, _, err := conn.ReadMessage()
 			if err != nil {
 				break // connection closed or timed out — expected
@@ -1039,9 +1064,9 @@ func TestWSHub_CloseOnce_NoPanic(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Close multiple times - should not panic
-	conn.Close()
-	conn.Close()
-	conn.Close()
+	_ = conn.Close()
+	_ = conn.Close()
+	_ = conn.Close()
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -1083,7 +1108,7 @@ func TestWSHub_BroadcastDuringClientChurn(t *testing.T) {
 					continue
 				}
 				time.Sleep(10 * time.Millisecond)
-				conn.Close()
+				_ = conn.Close()
 			}
 		}
 	}()
@@ -1130,7 +1155,7 @@ func containsHelper(s, substr string) bool {
 func drainMessages(t *testing.T, conn *websocket.Conn, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		conn.SetReadDeadline(time.Now().Add(time.Second))
+		mustSetReadDeadline(t, conn, time.Second)
 		_, _, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("drain message %d: %v", i, err)

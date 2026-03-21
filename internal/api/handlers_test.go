@@ -123,7 +123,7 @@ func TestHandleLatest_WithData(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 
 	if resp["symbol"] != "BTC/USD" {
 		t.Errorf("expected symbol BTC/USD, got %v", resp["symbol"])
@@ -148,7 +148,7 @@ func TestHandleLatest_StaleAndDegraded(t *testing.T) {
 	s.handleLatest(rr, httptest.NewRequest("GET", "/v1/price/latest", nil))
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["is_stale"] != true {
 		t.Errorf("expected is_stale true")
 	}
@@ -234,7 +234,7 @@ func TestHandleSnapshots_Success(t *testing.T) {
 	}
 
 	var resp []map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if len(resp) != 1 {
 		t.Fatalf("expected 1 snapshot, got %d", len(resp))
 	}
@@ -253,7 +253,7 @@ func TestHandleSnapshots_Empty(t *testing.T) {
 		t.Errorf("expected 200, got %d", rr.Code)
 	}
 	var resp []map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if len(resp) != 0 {
 		t.Errorf("expected empty array, got %d items", len(resp))
 	}
@@ -330,7 +330,7 @@ func TestHandleTicks_Success(t *testing.T) {
 	s.handleTicks(rr, httptest.NewRequest("GET", "/v1/price/ticks?limit=10", nil))
 
 	var resp []map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if len(resp) != 1 {
 		t.Fatalf("expected 1 tick, got %d", len(resp))
 	}
@@ -398,7 +398,7 @@ func TestHandleRaw_Success(t *testing.T) {
 	s.handleRaw(rr, httptest.NewRequest("GET", "/v1/price/raw?source=binance&limit=10", nil))
 
 	var resp []map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if len(resp) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(resp))
 	}
@@ -424,7 +424,7 @@ func TestHandleRaw_Empty(t *testing.T) {
 	s.handleRaw(rr, httptest.NewRequest("GET", "/v1/price/raw", nil))
 
 	var resp []map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if len(resp) != 0 {
 		t.Errorf("expected empty array, got %d items", len(resp))
 	}
@@ -443,7 +443,7 @@ func TestHandleHealth_NoData(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["status"] != "no_data" {
 		t.Errorf("expected status no_data, got %v", resp["status"])
 	}
@@ -459,7 +459,7 @@ func TestHandleHealth_OK(t *testing.T) {
 	s.handleHealth(rr, httptest.NewRequest("GET", "/v1/health", nil))
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["status"] != "ok" {
 		t.Errorf("expected status ok, got %v", resp["status"])
 	}
@@ -476,7 +476,7 @@ func TestHandleHealth_Stale(t *testing.T) {
 	s.handleHealth(rr, httptest.NewRequest("GET", "/v1/health", nil))
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["status"] != "stale" {
 		t.Errorf("expected status stale, got %v", resp["status"])
 	}
@@ -490,7 +490,7 @@ func TestHandleHealth_Degraded(t *testing.T) {
 	s.handleHealth(rr, httptest.NewRequest("GET", "/v1/health", nil))
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["status"] != "degraded" {
 		t.Errorf("expected status degraded, got %v", resp["status"])
 	}
@@ -606,7 +606,7 @@ func TestHandleSettlement_Confirmed(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["status"] != "confirmed" {
 		t.Errorf("expected status confirmed, got %v", resp["status"])
 	}
@@ -629,7 +629,7 @@ func TestHandleSettlement_Stale(t *testing.T) {
 	s.handleSettlement(rr, httptest.NewRequest("GET", "/v1/price/settlement?ts=2026-03-19T09:10:00Z", nil))
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["status"] != "stale" {
 		t.Errorf("expected status stale, got %v", resp["status"])
 	}
@@ -649,7 +649,7 @@ func TestHandleSettlement_Degraded(t *testing.T) {
 	s.handleSettlement(rr, httptest.NewRequest("GET", "/v1/price/settlement?ts=2026-03-19T09:10:00Z", nil))
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if resp["status"] != "degraded" {
 		t.Errorf("expected status degraded, got %v", resp["status"])
 	}
@@ -719,7 +719,7 @@ func TestHandleFeedHealth_Success(t *testing.T) {
 	}
 
 	var resp []map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if len(resp) != 2 {
 		t.Fatalf("expected 2 feeds, got %d", len(resp))
 	}
@@ -757,7 +757,7 @@ func TestHandleFeedHealth_Empty(t *testing.T) {
 	s.handleFeedHealth(rr, httptest.NewRequest("GET", "/v1/health/feeds", nil))
 
 	var resp []map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	decodeJSON(t, rr, &resp)
 	if len(resp) != 0 {
 		t.Errorf("expected empty array, got %d items", len(resp))
 	}
@@ -770,7 +770,7 @@ func TestHandleFeedHealth_Empty(t *testing.T) {
 func TestCorsMiddleware_OPTIONS(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "inner")
+		_, _ = fmt.Fprint(w, "inner")
 	})
 	handler := corsMiddleware(inner)
 
@@ -797,7 +797,7 @@ func TestCorsMiddleware_OPTIONS(t *testing.T) {
 
 func TestCorsMiddleware_GET(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	})
 	handler := corsMiddleware(inner)
 
@@ -814,7 +814,7 @@ func TestCorsMiddleware_GET(t *testing.T) {
 
 func TestJsonMiddleware(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"ok":true}`)
+		_, _ = fmt.Fprint(w, `{"ok":true}`)
 	})
 	handler := jsonMiddleware(inner)
 
@@ -1020,6 +1020,13 @@ func TestBroadcastLoop_TickChannelClose(t *testing.T) {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+func decodeJSON(t *testing.T, rr *httptest.ResponseRecorder, v interface{}) {
+	t.Helper()
+	if err := json.NewDecoder(rr.Body).Decode(v); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+}
 
 func expectBodyContains(t *testing.T, rr *httptest.ResponseRecorder, substr string) {
 	t.Helper()

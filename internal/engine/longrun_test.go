@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"log/slog"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -660,10 +658,3 @@ done:
 	t.Logf("Settlement accuracy test: price=%s, sources=%d, basis=%s", price, len(refs), basis)
 }
 
-// =============================================================================
-// Helper
-// =============================================================================
-
-func silentTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 100}))
-}
