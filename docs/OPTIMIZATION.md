@@ -97,6 +97,6 @@
 - [ ] Lightning-fast recompression
 - [x] Direct Compress with continuous aggregates
 - [ ] UUIDv7 in continuous aggregates
-**TimescaleDB Version:** 2.17+ (minimum required)
+**TimescaleDB Version:** 2.24.0 (deployed)
 **Verified At:** implementation time
 <!-- TIMESCALEDB_IMPLEMENTATION:END -->

@@ -2,7 +2,7 @@
 
 ## Overview
 
-btick uses PostgreSQL 17+ with TimescaleDB 2.17+ for persistent storage. The schema is designed for:
+btick uses PostgreSQL 17+ with TimescaleDB 2.24+ for persistent storage. The schema is designed for:
 - High-throughput event ingestion via TimescaleDB hypertables
 - Fast time-range queries with automatic chunk management
 - Immutable audit trail

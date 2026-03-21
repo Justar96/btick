@@ -1,7 +1,7 @@
 # btick API Documentation
 
 **Version:** 1.0  
-**Base URL:** `http://localhost:8080` (development) | `https://your-domain.com` (production)
+**Base URL:** `http://localhost:8080` (development) | `https://btick-production.up.railway.app` (production)
 
 ---
 
@@ -17,6 +17,14 @@ btick is a real-time Bitcoin price oracle service that aggregates prices from mu
 - **5-minute settlement prices** — For prediction market resolution
 - **Quality scoring** — Data freshness and source count metrics
 - **Outlier rejection** — 1% deviation filter
+
+---
+
+## Transport
+
+- **Content-Type:** All responses are `application/json`
+- **CORS:** `Access-Control-Allow-Origin: *` — all origins permitted, `GET` and `OPTIONS` methods allowed
+- **Machine-readable spec:** See `openapi.yaml` for the full OpenAPI 3.0 schema
 
 ---
 
@@ -48,13 +56,17 @@ System health check with latest price status.
 | `stale` | No fresh data, using carry-forward |
 | `no_data` | No price data available yet |
 
+> Note: `latest_price`, `latest_ts`, and `source_count` are omitted when status is `no_data`.
+
 ---
 
 #### GET /v1/health/feeds
 
-Per-source feed health status.
+Per-source feed health status. Requires database.
 
-**Response:**
+**Error:** `503` with `{"error":"database not available"}` if no database configured.
+
+**Response (200):**
 
 ```json
 [
@@ -86,6 +98,8 @@ Per-source feed health status.
 ]
 ```
 
+> **Optional fields:** `last_message_ts`, `last_trade_ts`, and `median_lag_ms` are omitted when their values are zero/unset.
+
 ---
 
 ### Price Data
@@ -94,7 +108,7 @@ Per-source feed health status.
 
 Get the current canonical BTC/USD price (from memory, lowest latency).
 
-**Response:**
+**Response (200):**
 
 ```json
 {
@@ -109,6 +123,8 @@ Get the current canonical BTC/USD price (from memory, lowest latency).
   "sources_used": ["binance", "coinbase", "kraken"]
 }
 ```
+
+**Error:** `503` with `{"error":"no data yet"}` if no price has been computed since startup.
 
 **Field descriptions:**
 
@@ -171,6 +187,11 @@ GET /v1/price/settlement?ts=2026-03-19T09:10:00Z
 }
 ```
 
+> **`source_details`** is the `source_details_json` JSONB column from the snapshot, base64-encoded by Go's `encoding/json` (since the column type is `[]byte`). Decode from base64 to get JSON like:
+> ```json
+> {"binance":{"price":"70105.45","ts":"2026-03-19T09:09:59.999Z"}, ...}
+> ```
+
 **Status values:**
 
 | Status | Description | Action |
@@ -194,7 +215,7 @@ GET /v1/price/settlement?ts=2026-03-19T09:10:00Z
 
 ```go
 func getSettlementPrice(marketCloseTime time.Time) (*SettlementPrice, error) {
-    url := fmt.Sprintf("https://price-oracle.example.com/v1/price/settlement?ts=%s", 
+    url := fmt.Sprintf("https://btick-production.up.railway.app/v1/price/settlement?ts=%s", 
         marketCloseTime.UTC().Format(time.RFC3339))
     
     resp, err := http.Get(url)
@@ -238,7 +259,16 @@ Query historical 1-second snapshots.
 GET /v1/price/snapshots?start=2026-03-19T09:00:00Z&end=2026-03-19T09:05:00Z
 ```
 
-**Response:**
+**Error Responses:**
+
+| Code | Error | When |
+|------|-------|------|
+| 400 | `start parameter required` | Missing `start` |
+| 400 | `invalid start time format, use RFC3339` | Bad `start` format |
+| 400 | `invalid end time format, use RFC3339` | Bad `end` format |
+| 503 | `database not available` | No database configured |
+
+**Response (200):**
 
 ```json
 [
@@ -279,7 +309,9 @@ Query recent canonical price change events.
 |------|------|----------|-------------|
 | `limit` | int | No | Number of ticks to return (default: 100, max: 1000) |
 
-**Response:**
+**Error:** `503` with `{"error":"database not available"}` if no database configured.
+
+**Response (200):**
 
 ```json
 [
@@ -312,7 +344,15 @@ Query raw tick data from individual exchanges (for debugging/auditing).
 | `end` | string | No | End time (RFC3339) |
 | `limit` | int | No | Number of events (default: 100) |
 
-**Response:**
+**Error Responses:**
+
+| Code | Error | When |
+|------|-------|------|
+| 400 | `invalid start time` | Bad `start` format |
+| 400 | `invalid end time` | Bad `end` format |
+| 503 | `database not available` | No database configured |
+
+**Response (200):**
 
 ```json
 [
@@ -338,7 +378,7 @@ Query raw tick data from individual exchanges (for debugging/auditing).
 
 ```
 ws://localhost:8080/ws/price
-wss://your-domain.com/ws/price
+wss://btick-production.up.railway.app/ws/price
 ```
 
 ### Connection Lifecycle
@@ -573,7 +613,7 @@ class BTCPriceSocket {
 }
 
 // Usage
-const priceSocket = new BTCPriceSocket('wss://price-oracle.example.com/ws/price');
+const priceSocket = new BTCPriceSocket('wss://btick-production.up.railway.app/ws/price');
 ```
 
 ---

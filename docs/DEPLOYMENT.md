@@ -13,7 +13,7 @@ btick can be deployed in multiple environments:
 ## Prerequisites
 
 - Go 1.23+
-- PostgreSQL 17+ with TimescaleDB 2.17+ (or Railway Postgres with TimescaleDB)
+- PostgreSQL 17+ with TimescaleDB 2.24+ (or Railway Postgres with TimescaleDB)
 - Outbound WebSocket access to:
   - `wss://stream.binance.com:9443`
   - `wss://advanced-trade-ws.coinbase.com`
@@ -430,7 +430,7 @@ health:
 
 ### Pre-Deployment
 
-- [ ] PostgreSQL 17+ with TimescaleDB 2.17+ provisioned with sufficient storage
+- [ ] PostgreSQL 17+ with TimescaleDB 2.24+ provisioned with sufficient storage
 - [ ] Database backups configured
 - [ ] `DATABASE_URL` set securely (not in git)
 - [ ] Outbound network allows WebSocket to exchanges

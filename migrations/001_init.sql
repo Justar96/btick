@@ -1,5 +1,5 @@
 -- btick Service schema
--- Requires PostgreSQL 17+ with TimescaleDB 2.17+
+-- Requires PostgreSQL 17+ with TimescaleDB 2.24+
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
