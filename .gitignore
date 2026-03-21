@@ -70,3 +70,6 @@ credentials/
 
 # Agents
 .agents/
+.claude/
+AGENTS.md
+CLAUDE.md
