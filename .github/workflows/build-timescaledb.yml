@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - "docker/timescaledb-ssl/**"
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 env:
