@@ -17,21 +17,21 @@ type MessageHandler func(msgType int, data []byte, recvTS time.Time)
 
 // BaseAdapter provides common WebSocket lifecycle management.
 type BaseAdapter struct {
-	name             string
-	url              string
-	pingInterval     time.Duration
-	maxConnLifetime  time.Duration
-	onMessage        MessageHandler
-	onConnected      func(conn *websocket.Conn) error // called after connect to send subscribe messages
-	logger           *slog.Logger
+	name            string
+	url             string
+	pingInterval    time.Duration
+	maxConnLifetime time.Duration
+	onMessage       MessageHandler
+	onConnected     func(conn *websocket.Conn) error // called after connect to send subscribe messages
+	logger          *slog.Logger
 
-	mu               sync.Mutex
-	conn             *websocket.Conn
-	connState        string
-	lastMessageTS    time.Time
-	reconnectCount   int
-	consecutiveErrs  int
-	cancel           context.CancelFunc
+	mu              sync.Mutex
+	conn            *websocket.Conn
+	connState       string
+	lastMessageTS   time.Time
+	reconnectCount  int
+	consecutiveErrs int
+	cancel          context.CancelFunc
 }
 
 // NewBaseAdapter creates a new adapter with reconnect/backoff behavior.
@@ -46,7 +46,7 @@ func NewBaseAdapter(name, url string, pingInterval, maxConnLifetime time.Duratio
 	}
 }
 
-func (a *BaseAdapter) SetMessageHandler(h MessageHandler) { a.onMessage = h }
+func (a *BaseAdapter) SetMessageHandler(h MessageHandler)           { a.onMessage = h }
 func (a *BaseAdapter) SetOnConnected(h func(*websocket.Conn) error) { a.onConnected = h }
 
 func (a *BaseAdapter) Name() string { return a.name }
@@ -162,6 +162,11 @@ func (a *BaseAdapter) connectAndRead(ctx context.Context) error {
 	a.cancel = connCancel
 	a.mu.Unlock()
 
+	go func() {
+		<-connCtx.Done()
+		_ = conn.Close()
+	}()
+
 	// Ping ticker
 	if a.pingInterval > 0 {
 		go a.pingLoop(connCtx, conn)
@@ -180,22 +185,29 @@ func (a *BaseAdapter) connectAndRead(ctx context.Context) error {
 	}
 
 	// Read loop
+	const readTimeout = 60 * time.Second
+	const readDeadlineRefresh = 15 * time.Second
+	nextDeadlineRefresh := time.Time{}
 	for {
-		select {
-		case <-connCtx.Done():
-			conn.Close()
-			a.setConnState("disconnected")
-			return ctx.Err()
-		default:
+		now := time.Now()
+		if nextDeadlineRefresh.IsZero() || now.After(nextDeadlineRefresh) {
+			if err := conn.SetReadDeadline(now.Add(readTimeout)); err != nil {
+				conn.Close()
+				a.setConnState("disconnected")
+				return fmt.Errorf("set read deadline: %w", err)
+			}
+			nextDeadlineRefresh = now.Add(readDeadlineRefresh)
 		}
 
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		msgType, data, err := conn.ReadMessage()
 		recvTS := time.Now()
 
 		if err != nil {
 			conn.Close()
 			a.setConnState("disconnected")
+			if ctx.Err() != nil || connCtx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("read: %w", err)
 		}
 

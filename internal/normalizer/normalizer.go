@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/justar9/btc-price-tick/internal/domain"
+	"github.com/justar9/btick/internal/domain"
 )
 
 // Normalizer receives raw events from adapters, assigns UUIDs, deduplicates, and forwards.

@@ -6,28 +6,52 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/justar9/btc-price-tick/internal/engine"
-	"github.com/justar9/btc-price-tick/internal/storage"
+	"github.com/justar9/btick/internal/config"
+	"github.com/justar9/btick/internal/domain"
 )
+
+// Store abstracts the database queries used by API handlers.
+type Store interface {
+	QuerySnapshots(ctx context.Context, start, end time.Time) ([]domain.Snapshot1s, error)
+	QuerySnapshotAt(ctx context.Context, ts time.Time) (*domain.Snapshot1s, error)
+	QueryCanonicalTicks(ctx context.Context, limit int) ([]domain.CanonicalTick, error)
+	QueryRawTicks(ctx context.Context, source string, start, end time.Time, limit int) ([]domain.RawEvent, error)
+	QueryFeedHealth(ctx context.Context) ([]domain.FeedHealth, error)
+}
+
+// Engine abstracts the snapshot engine used by API handlers.
+type Engine interface {
+	LatestState() *domain.LatestState
+	SnapshotCh() <-chan domain.Snapshot1s
+	TickCh() <-chan domain.CanonicalTick
+}
 
 // Server is the HTTP/WS API server.
 type Server struct {
 	httpAddr string
 	wsPath   string
-	db       *storage.DB
-	engine   *engine.SnapshotEngine
+	db       Store
+	engine   Engine
 	wsHub    *WSHub
 	logger   *slog.Logger
 	srv      *http.Server
+	nowFunc  func() time.Time // injectable for testing; defaults to time.Now
 }
 
-func NewServer(httpAddr, wsPath string, db *storage.DB, eng *engine.SnapshotEngine, logger *slog.Logger) *Server {
+func (s *Server) now() time.Time {
+	if s.nowFunc != nil {
+		return s.nowFunc()
+	}
+	return time.Now()
+}
+
+func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, db Store, eng Engine, logger *slog.Logger) *Server {
 	s := &Server{
 		httpAddr: httpAddr,
 		wsPath:   wsPath,
 		db:       db,
 		engine:   eng,
-		wsHub:    NewWSHub(logger),
+		wsHub:    NewWSHub(logger, wsCfg, eng.LatestState),
 		logger:   logger.With("component", "api"),
 	}
 	return s

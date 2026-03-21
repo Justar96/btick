@@ -11,8 +11,8 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"github.com/justar9/btc-price-tick/internal/config"
-	"github.com/justar9/btc-price-tick/internal/domain"
+	"github.com/justar9/btick/internal/config"
+	"github.com/justar9/btick/internal/domain"
 )
 
 // =============================================================================

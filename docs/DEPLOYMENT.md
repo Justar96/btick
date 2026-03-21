@@ -2,7 +2,7 @@
 
 ## Overview
 
-BTC Price Tick can be deployed in multiple environments:
+btick can be deployed in multiple environments:
 - Local development
 - Railway (recommended for quick setup)
 - Docker/Kubernetes
@@ -12,8 +12,8 @@ BTC Price Tick can be deployed in multiple environments:
 
 ## Prerequisites
 
-- Go 1.22+
-- PostgreSQL 14+ (or Railway Postgres)
+- Go 1.23+
+- PostgreSQL 17+ with TimescaleDB 2.17+ (or Railway Postgres with TimescaleDB)
 - Outbound WebSocket access to:
   - `wss://stream.binance.com:9443`
   - `wss://advanced-trade-ws.coinbase.com`
@@ -26,8 +26,8 @@ BTC Price Tick can be deployed in multiple environments:
 ### 1. Clone and Setup
 
 ```bash
-git clone https://github.com/justar9/btc-price-tick.git
-cd btc-price-tick
+git clone https://github.com/justar9/btick.git
+cd btick
 ```
 
 ### 2. Copy Config
@@ -42,17 +42,17 @@ cp config.yaml.example config.yaml
 ```bash
 # Start PostgreSQL (if not running)
 docker run -d --name btc-postgres \
-  -e POSTGRES_DB=btctick \
+  -e POSTGRES_DB=btick \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
   postgres:14
 
 # Update config.yaml
-# dsn: "postgres://postgres:postgres@localhost:5432/btctick?sslmode=disable"
+# dsn: "postgres://postgres:postgres@localhost:5432/btick?sslmode=disable"
 
 # Run the service
-go run ./cmd/btctick
+go run ./cmd/btick
 ```
 
 ### 4. Run with Railway Database
@@ -62,7 +62,7 @@ go run ./cmd/btctick
 railway link
 
 # Run with Railway env vars
-railway run go run ./cmd/btctick
+railway run go run ./cmd/btick
 ```
 
 ---
@@ -120,30 +120,30 @@ Create `railway.toml` in project root:
 builder = "nixpacks"
 
 [deploy]
-startCommand = "./btctick"
+startCommand = "./btick"
 healthcheckPath = "/v1/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 ```
 
-Or use `Dockerfile`:
+Or use the project `Dockerfile`:
 
 ```dockerfile
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o btctick ./cmd/btctick
+RUN CGO_ENABLED=0 GOOS=linux go build -o /btick ./cmd/btick
 
-FROM alpine:3.19
-RUN apk add --no-cache ca-certificates
-WORKDIR /app
-COPY --from=builder /app/btctick .
-COPY config.yaml.example config.yaml
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /btick /btick
+COPY config.yaml.example /config.yaml
+COPY migrations/ /migrations/
 EXPOSE 8080
-CMD ["./btctick"]
+CMD ["/btick", "-config", "/config.yaml"]
 ```
 
 ### 6. Verify Deployment
@@ -163,7 +163,7 @@ curl https://your-app.railway.app/v1/health
 ### Build Image
 
 ```bash
-docker build -t btc-price-tick:latest .
+docker build -t btick:latest .
 ```
 
 ### Run with Docker Compose
@@ -174,12 +174,12 @@ Create `docker-compose.yml`:
 version: '3.8'
 
 services:
-  btctick:
+  btick:
     build: .
     ports:
       - "8080:8080"
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@db:5432/btctick?sslmode=disable
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/btick?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
@@ -188,7 +188,7 @@ services:
   db:
     image: postgres:14-alpine
     environment:
-      POSTGRES_DB: btctick
+      POSTGRES_DB: btick
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     volumes:
@@ -219,13 +219,18 @@ docker-compose up -d
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: btc-price-tick-config
+  name: btick-config
 data:
   config.yaml: |
     canonical_symbol: BTC/USD
     server:
       http_addr: ":8080"
       ws_path: /ws/price
+      ws:
+        send_buffer_size: 256
+        heartbeat_interval_sec: 5
+        ping_interval_sec: 30
+        read_deadline_sec: 60
     database:
       dsn: "${DATABASE_URL}"
       max_conns: 20
@@ -257,7 +262,7 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: btc-price-tick-secrets
+  name: btick-secrets
 type: Opaque
 stringData:
   DATABASE_URL: "postgresql://user:pass@host:5432/db"
@@ -269,27 +274,27 @@ stringData:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: btc-price-tick
+  name: btick
 spec:
   replicas: 1  # Only 1 replica - see note below
   selector:
     matchLabels:
-      app: btc-price-tick
+      app: btick
   template:
     metadata:
       labels:
-        app: btc-price-tick
+        app: btick
     spec:
       containers:
-      - name: btc-price-tick
-        image: your-registry/btc-price-tick:latest
+      - name: btick
+        image: your-registry/btick:latest
         ports:
         - containerPort: 8080
         env:
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
-              name: btc-price-tick-secrets
+              name: btick-secrets
               key: DATABASE_URL
         volumeMounts:
         - name: config
@@ -317,7 +322,7 @@ spec:
       volumes:
       - name: config
         configMap:
-          name: btc-price-tick-config
+          name: btick-config
 ```
 
 ### Service
@@ -326,10 +331,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: btc-price-tick
+  name: btick
 spec:
   selector:
-    app: btc-price-tick
+    app: btick
   ports:
   - port: 80
     targetPort: 8080
@@ -346,9 +351,10 @@ spec:
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
+| `DATABASE_URL` | PostgreSQL connection string (overrides `database.dsn` in config) | No (app runs without DB) |
 | `PORT` | HTTP server port (overrides config) | No |
-| `CONFIG_PATH` | Path to config.yaml | No (default: `./config.yaml`) |
+
+Config path is set via the `-config` flag (default: `./config.yaml`), not an environment variable.
 
 ### Config File
 
@@ -360,6 +366,11 @@ canonical_symbol: BTC/USD
 server:
   http_addr: ":8080"          # HTTP/WS listen address
   ws_path: /ws/price          # WebSocket endpoint path
+  ws:
+    send_buffer_size: 256       # Per-client message buffer
+    heartbeat_interval_sec: 5   # App-level heartbeat period
+    ping_interval_sec: 30       # WebSocket-level ping period
+    read_deadline_sec: 60       # Pong timeout
 
 database:
   dsn: "${DATABASE_URL}"      # Env var substitution supported
@@ -382,6 +393,7 @@ sources:
     use_book_ticker_fallback: true
     jwt: ""                   # Optional for higher rate limits
     ping_interval_sec: 25
+    max_conn_lifetime_sec: 0  # 0 = no limit
 
   - name: kraken
     enabled: true
@@ -389,6 +401,7 @@ sources:
     native_symbol: BTC/USD
     use_ticker_fallback: true
     ping_interval_sec: 30
+    max_conn_lifetime_sec: 0  # 0 = no limit
 
 pricing:
   mode: multi_venue_median    # Pricing algorithm
@@ -400,10 +413,11 @@ pricing:
   carry_forward_max_seconds: 10
 
 storage:
-  raw_retention_days: 14
+  raw_retention_days: 1
+  canonical_retention_days: 1
   snapshots_retention_days: 365
-  batch_insert_max_rows: 1000
-  batch_insert_max_delay_ms: 200
+  batch_insert_max_rows: 2000
+  batch_insert_max_delay_ms: 100
 
 health:
   source_stale_after_ms: 3000
@@ -416,7 +430,7 @@ health:
 
 ### Pre-Deployment
 
-- [ ] PostgreSQL 14+ provisioned with sufficient storage
+- [ ] PostgreSQL 17+ with TimescaleDB 2.17+ provisioned with sufficient storage
 - [ ] Database backups configured
 - [ ] `DATABASE_URL` set securely (not in git)
 - [ ] Outbound network allows WebSocket to exchanges
@@ -426,7 +440,7 @@ health:
 
 - [ ] Verify all 3 sources connect: `GET /v1/health/feeds`
 - [ ] Verify prices streaming: `GET /v1/price/latest`
-- [ ] Test WebSocket: `wscat -c wss://your-domain/ws/price`
+- [ ] Test WebSocket: `websocat wss://your-domain/ws/price` — verify welcome, initial state, heartbeats
 - [ ] Set up monitoring/alerting
 - [ ] Test settlement endpoint
 
@@ -461,7 +475,7 @@ health:
 # Check logs
 railway logs
 # OR
-docker logs btctick
+docker logs btick
 
 # Common issues:
 # 1. DATABASE_URL not set

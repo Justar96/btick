@@ -12,10 +12,30 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
-	"github.com/justar9/btc-price-tick/internal/config"
-	"github.com/justar9/btc-price-tick/internal/domain"
-	"github.com/justar9/btc-price-tick/internal/storage"
+	"github.com/justar9/btick/internal/config"
+	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/storage"
 )
+
+const (
+	canonicalTickBatchMaxRows  = 128
+	canonicalTickBatchMaxDelay = 100 * time.Millisecond
+	pipelineLatencyLogInterval = time.Minute
+	maxPipelineLatency         = time.Minute
+)
+
+type pipelineLatencyStats struct {
+	since    time.Time
+	count    int64
+	totalMs  int64
+	maxMs    int64
+	le50Ms   int64
+	le100Ms  int64
+	le250Ms  int64
+	le500Ms  int64
+	le1000Ms int64
+	gt1000Ms int64
+}
 
 // SnapshotEngine produces canonical ticks and 1-second snapshots.
 type SnapshotEngine struct {
@@ -42,6 +62,9 @@ type SnapshotEngine struct {
 	// Latest state for API
 	latestMu    sync.RWMutex
 	latestState *domain.LatestState
+
+	latencyMu sync.Mutex
+	latency   pipelineLatencyStats
 
 	// Semaphore to limit concurrent snapshot finalizations
 	finalizeSem chan struct{}
@@ -85,6 +108,7 @@ func NewSnapshotEngine(
 		tickCh:          make(chan domain.CanonicalTick, 1000),
 		venueStates:     make(map[string]*venueState),
 		logger:          logger.With("component", "snapshot_engine"),
+		latency:         pipelineLatencyStats{since: time.Now().UTC()},
 		finalizeSem:     make(chan struct{}, 10), // max 10 concurrent finalizations
 		ticksToWrite:    make(chan domain.CanonicalTick, 500),
 	}
@@ -194,6 +218,8 @@ func (e *SnapshotEngine) updateVenueState(evt domain.RawEvent) {
 			ts:  evt.ExchangeTS,
 		}
 	}
+
+	e.recordPipelineLatency(evt)
 }
 
 func (e *SnapshotEngine) emitTick(evt domain.RawEvent) {
@@ -351,6 +377,8 @@ func (e *SnapshotEngine) finalizeSnapshot(ctx context.Context, snapshotSecond ti
 		"sources", len(refs),
 		"stale", isStale,
 	)
+
+	e.maybeLogPipelineLatency(now)
 }
 
 // computeVenueRefs computes per-venue reference prices at given time.
@@ -519,30 +547,145 @@ func (e *SnapshotEngine) computeQuality(refs []domain.VenueRefPrice, isStale boo
 	return decimal.NewFromFloat(math.Round(score*10000) / 10000)
 }
 
+func (e *SnapshotEngine) recordPipelineLatency(evt domain.RawEvent) {
+	if evt.ExchangeTS.IsZero() || evt.RecvTS.IsZero() {
+		return
+	}
+
+	lag := evt.RecvTS.Sub(evt.ExchangeTS)
+	if lag < 0 || lag > maxPipelineLatency {
+		return
+	}
+
+	lagMs := lag.Milliseconds()
+
+	e.latencyMu.Lock()
+	defer e.latencyMu.Unlock()
+
+	if e.latency.since.IsZero() {
+		e.latency.since = evt.RecvTS.UTC()
+	}
+
+	e.latency.count++
+	e.latency.totalMs += lagMs
+	if lagMs > e.latency.maxMs {
+		e.latency.maxMs = lagMs
+	}
+
+	switch {
+	case lagMs <= 50:
+		e.latency.le50Ms++
+	case lagMs <= 100:
+		e.latency.le100Ms++
+	case lagMs <= 250:
+		e.latency.le250Ms++
+	case lagMs <= 500:
+		e.latency.le500Ms++
+	case lagMs <= 1000:
+		e.latency.le1000Ms++
+	default:
+		e.latency.gt1000Ms++
+	}
+}
+
+func (e *SnapshotEngine) maybeLogPipelineLatency(now time.Time) {
+	e.latencyMu.Lock()
+	if e.latency.count == 0 || now.Sub(e.latency.since) < pipelineLatencyLogInterval {
+		e.latencyMu.Unlock()
+		return
+	}
+
+	stats := e.latency
+	e.latency = pipelineLatencyStats{since: now.UTC()}
+	e.latencyMu.Unlock()
+
+	avgMs := math.Round((float64(stats.totalMs)/float64(stats.count))*100) / 100
+	window := now.Sub(stats.since)
+	if window <= 0 {
+		window = pipelineLatencyLogInterval
+	}
+
+	e.logger.Info("pipeline latency histogram",
+		"window", window,
+		"samples", stats.count,
+		"avg_ms", avgMs,
+		"max_ms", stats.maxMs,
+		"le_50ms", stats.le50Ms,
+		"le_100ms", stats.le100Ms,
+		"le_250ms", stats.le250Ms,
+		"le_500ms", stats.le500Ms,
+		"le_1000ms", stats.le1000Ms,
+		"gt_1000ms", stats.gt1000Ms,
+	)
+}
+
 // runTickWriter drains ticksToWrite channel and persists canonical ticks to DB.
 func (e *SnapshotEngine) runTickWriter(ctx context.Context) {
+	flushTicker := time.NewTicker(canonicalTickBatchMaxDelay)
+	defer flushTicker.Stop()
+
+	batch := make([]domain.CanonicalTick, 0, canonicalTickBatchMaxRows)
+	flush := func(flushCtx context.Context) {
+		if len(batch) == 0 {
+			return
+		}
+
+		ticks := append([]domain.CanonicalTick(nil), batch...)
+		batch = batch[:0]
+
+		if err := e.db.InsertCanonicalTicks(flushCtx, ticks); err == nil {
+			return
+		} else {
+			e.logger.Error("insert canonical tick batch failed, falling back to individual inserts",
+				"error", err,
+				"batch_size", len(ticks),
+			)
+		}
+
+		for _, tick := range ticks {
+			if err := e.db.InsertCanonicalTick(flushCtx, tick); err != nil {
+				e.logger.Error("insert canonical tick failed",
+					"error", err,
+					"tick_id", tick.TickID,
+				)
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain remaining ticks on shutdown
 			for {
 				select {
 				case tick := <-e.ticksToWrite:
-					writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					if err := e.db.InsertCanonicalTick(writeCtx, tick); err != nil {
-						e.logger.Error("insert canonical tick failed", "error", err)
+					batch = append(batch, tick)
+					if len(batch) >= canonicalTickBatchMaxRows {
+						writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						flush(writeCtx)
+						cancel()
 					}
-					cancel()
 				default:
+					if len(batch) > 0 {
+						writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						flush(writeCtx)
+						cancel()
+					}
 					return
 				}
 			}
 		case tick := <-e.ticksToWrite:
-			writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			if err := e.db.InsertCanonicalTick(writeCtx, tick); err != nil {
-				e.logger.Error("insert canonical tick failed", "error", err)
+			batch = append(batch, tick)
+			if len(batch) >= canonicalTickBatchMaxRows {
+				writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				flush(writeCtx)
+				cancel()
 			}
-			cancel()
+		case <-flushTicker.C:
+			if len(batch) > 0 {
+				writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				flush(writeCtx)
+				cancel()
+			}
 		}
 	}
 }

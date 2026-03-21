@@ -1,4 +1,4 @@
-# BTC Price Tick API Documentation
+# btick API Documentation
 
 **Version:** 1.0  
 **Base URL:** `http://localhost:8080` (development) | `https://your-domain.com` (production)
@@ -7,7 +7,7 @@
 
 ## Overview
 
-BTC Price Tick is a real-time Bitcoin price oracle service that aggregates prices from multiple exchanges (Binance, Coinbase, Kraken) and produces a canonical price using multi-venue median pricing. This service is designed for prediction market settlement and real-time price feeds.
+btick is a real-time Bitcoin price oracle service that aggregates prices from multiple exchanges (Binance, Coinbase, Kraken) and produces a canonical price using multi-venue median pricing. This service is designed for prediction market settlement and real-time price feeds.
 
 ### Key Features
 
@@ -183,12 +183,12 @@ GET /v1/price/settlement?ts=2026-03-19T09:10:00Z
 
 | Code | Error | Description |
 |------|-------|-------------|
-| 400 | `ts parameter required` | Missing timestamp parameter |
-| 400 | `invalid ts format` | Use RFC3339 format |
-| 400 | `ts must be on a 5-minute boundary` | e.g., 09:05:00, 09:10:00 |
+| 400 | `ts parameter required (RFC3339 format, e.g. 2026-03-19T09:05:00Z)` | Missing timestamp parameter |
+| 400 | `invalid ts format, use RFC3339 (e.g. 2026-03-19T09:05:00Z)` | Use RFC3339 format |
+| 400 | `ts must be on a 5-minute boundary (e.g. 09:05:00, 09:10:00)` | e.g., 09:05:00, 09:10:00 |
 | 400 | `ts cannot be in the future` | Cannot query future prices |
-| 425 | `settlement price not yet finalized` | Wait a few seconds after the boundary |
-| 404 | `settlement price not found` | No data for this timestamp |
+| 425 | `settlement price not yet finalized, wait a few seconds` | Wait at least 5 seconds after the boundary |
+| 404 | `settlement price not found for this timestamp` | No data for this timestamp |
 
 **Integration Example (Go):**
 
@@ -341,9 +341,51 @@ ws://localhost:8080/ws/price
 wss://your-domain.com/ws/price
 ```
 
-### Message Types
+### Connection Lifecycle
 
-The WebSocket streams two types of messages:
+On connect, the server sends two messages before any live broadcast data:
+
+**1. Welcome message** (always first):
+```json
+{
+  "type": "welcome",
+  "ts": "2026-03-19T09:10:00.123456789Z",
+  "message": "btick/v1"
+}
+```
+
+**2. Initial state** (current price, or no-data indicator):
+```json
+{
+  "type": "latest_price",
+  "ts": "2026-03-19T09:10:00.123456789Z",
+  "price": "70105.45",
+  "basis": "median_trade",
+  "quality_score": "0.9556",
+  "source_count": 3,
+  "sources_used": ["binance", "coinbase", "kraken"],
+  "message": "initial_state"
+}
+```
+
+If no data is available yet:
+```json
+{
+  "type": "latest_price",
+  "ts": "2026-03-19T09:10:00.123456789Z",
+  "message": "no_data_yet"
+}
+```
+
+Welcome and initial state messages do **not** carry a `seq` field — they are per-connection, not broadcast.
+
+After these two messages, live broadcast data begins flowing.
+
+---
+
+### Message Types (Server → Client)
+
+All broadcast messages carry a monotonically increasing `seq` (uint64) for gap detection.
 
 #### 1. Real-time Price Updates (`latest_price`)
 
@@ -352,6 +394,7 @@ Sent on every trade that changes the canonical price (sub-second).
 ```json
 {
   "type": "latest_price",
+  "seq": 42,
   "ts": "2026-03-19T09:10:00.123456789Z",
   "price": "70105.45",
   "basis": "median_trade",
@@ -369,6 +412,7 @@ Sent every second with the finalized price for that second.
 ```json
 {
   "type": "snapshot_1s",
+  "seq": 43,
   "ts": "2026-03-19T09:10:00Z",
   "price": "70105.45",
   "basis": "median_trade",
@@ -379,11 +423,69 @@ Sent every second with the finalized price for that second.
 }
 ```
 
+#### 3. Heartbeat (`heartbeat`)
+
+Sent at a configurable interval (default 5 seconds). Carries `seq` so clients can confirm their sequence is current during quiet periods.
+
+```json
+{
+  "type": "heartbeat",
+  "seq": 44,
+  "ts": "2026-03-19T09:10:05.000000000Z"
+}
+```
+
+---
+
+### Sequence Numbers
+
+All broadcast messages (including heartbeats) share a single monotonically increasing `seq` counter. Clients detect gaps to know when messages were missed:
+
+- Received `seq: 10` then `seq: 13` → missed 2 messages
+- Action: call `GET /v1/price/latest` to resync current state
+
+With subscription filtering, clients subscribed to a subset of message types will naturally see `seq` gaps — this is expected and not an indication of dropped messages.
+
+---
+
+### Subscription Filtering (Client → Server)
+
+Clients can subscribe/unsubscribe from specific message types. By default, all types are subscribed (backward-compatible — a client that sends nothing receives everything).
+
+**Subscribe:**
+```json
+{"action": "subscribe", "types": ["snapshot_1s", "latest_price", "heartbeat"]}
+```
+
+**Unsubscribe:**
+```json
+{"action": "unsubscribe", "types": ["snapshot_1s"]}
+```
+
+**Available types:** `snapshot_1s`, `latest_price`, `heartbeat`
+
+Unknown actions and types are silently ignored (forward-compatible).
+
+**Example — chart client that only needs snapshots:**
+```json
+{"action": "unsubscribe", "types": ["latest_price", "heartbeat"]}
+```
+
+---
+
 ### Connection Handling
 
-- **Ping/Pong:** Server sends WebSocket pings every 30 seconds
-- **Reconnection:** Client should implement exponential backoff reconnection
-- **Buffer:** Messages are buffered (256 messages), slow clients may miss updates
+| Feature | Default | Configurable |
+|---------|---------|--------------|
+| Send buffer per client | 256 messages | `server.ws.send_buffer_size` |
+| Application heartbeat | Every 5s | `server.ws.heartbeat_interval_sec` |
+| WebSocket ping | Every 30s | `server.ws.ping_interval_sec` |
+| Read deadline (pong timeout) | 60s | `server.ws.read_deadline_sec` |
+
+- **Drop handling:** If a client's send buffer fills (slow consumer), messages are dropped silently rather than blocking other clients. Drops are logged server-side every 100 occurrences.
+- **Reconnection:** Client should implement exponential backoff. On reconnect, the client receives a fresh welcome + initial state.
+
+---
 
 ### JavaScript Example
 
@@ -393,24 +495,55 @@ class BTCPriceSocket {
     this.url = url;
     this.reconnectDelay = 1000;
     this.maxReconnectDelay = 30000;
+    this.lastSeq = 0;
     this.connect();
   }
 
   connect() {
     this.ws = new WebSocket(this.url);
-    
+
     this.ws.onopen = () => {
       console.log('Connected to BTC price feed');
       this.reconnectDelay = 1000;
+
+      // Optional: only subscribe to what you need
+      // this.ws.send(JSON.stringify({
+      //   action: 'unsubscribe',
+      //   types: ['snapshot_1s']
+      // }));
     };
 
     this.ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      
-      if (msg.type === 'latest_price') {
-        this.onPriceUpdate(msg);
-      } else if (msg.type === 'snapshot_1s') {
-        this.onSnapshot(msg);
+
+      // Detect gaps in sequence numbers
+      if (msg.seq) {
+        if (this.lastSeq > 0 && msg.seq > this.lastSeq + 1) {
+          console.warn(`Missed ${msg.seq - this.lastSeq - 1} messages`);
+          // Optionally resync: fetch('/v1/price/latest')
+        }
+        this.lastSeq = msg.seq;
+      }
+
+      switch (msg.type) {
+        case 'welcome':
+          console.log('Server:', msg.message);
+          break;
+        case 'latest_price':
+          if (msg.message === 'initial_state') {
+            this.onInitialState(msg);
+          } else if (msg.message === 'no_data_yet') {
+            console.log('Waiting for first price data...');
+          } else {
+            this.onPriceUpdate(msg);
+          }
+          break;
+        case 'snapshot_1s':
+          this.onSnapshot(msg);
+          break;
+        case 'heartbeat':
+          // Connection alive confirmation
+          break;
       }
     };
 
@@ -426,14 +559,16 @@ class BTCPriceSocket {
     };
   }
 
+  onInitialState(msg) {
+    console.log(`Initial price: $${msg.price} (${msg.source_count} sources)`);
+  }
+
   onPriceUpdate(msg) {
-    // Handle real-time price update
-    console.log(`Price: $${msg.price} (${msg.source_count} sources)`);
+    console.log(`Price: $${msg.price} [seq:${msg.seq}]`);
   }
 
   onSnapshot(msg) {
-    // Handle 1-second snapshot
-    console.log(`Snapshot: $${msg.price} @ ${msg.ts}`);
+    console.log(`Snapshot: $${msg.price} @ ${msg.ts} [seq:${msg.seq}]`);
   }
 }
 
@@ -544,19 +679,22 @@ The `quality_score` (0-1) is computed based on:
 ### Stale Data Handling
 
 Data is considered stale when:
-- No fresh trades for > 2 seconds (configurable)
+- No fresh trades within the trade freshness window (default 2 seconds, configurable via `trade_freshness_window_ms`)
+- The canonical price age exceeds the stale threshold (default 3 seconds, configurable via `canonical_stale_after_ms`)
 - All venue connections are down
 
-When stale, the system carries forward the last known price for up to 10 seconds.
+When stale, the system carries forward the last known price for up to 10 seconds (configurable via `carry_forward_max_seconds`).
 
 ---
 
 ## Rate Limits
 
-| Endpoint | Limit |
+No application-level rate limiting is currently implemented. Consider adding a reverse proxy (e.g., nginx, Caddy) for production rate limiting.
+
+| Endpoint | Notes |
 |----------|-------|
-| REST APIs | 100 req/sec per IP |
-| WebSocket | 1 connection per client |
+| REST APIs | No built-in rate limit |
+| WebSocket | No connection limit enforced (slow consumers are dropped) |
 
 ---
 
@@ -584,6 +722,15 @@ Common HTTP status codes:
 ---
 
 ## Changelog
+
+### v1.1 (2026-03-21)
+- WebSocket: welcome message + initial state on connect (no more ~1s wait)
+- WebSocket: sequence numbers on all broadcast messages for gap detection
+- WebSocket: subscription filtering (`subscribe`/`unsubscribe` actions)
+- WebSocket: application-level heartbeat (default 5s, configurable)
+- WebSocket: per-client drop logging
+- WebSocket: configurable send buffer, ping interval, read deadline
+- API: `Store`/`Engine` interfaces for testability (100% test coverage)
 
 ### v1.0 (2026-03-19)
 - Initial release

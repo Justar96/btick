@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: BTC Price Tick API
+  title: btick API
   description: |
     Real-time Bitcoin price oracle service for prediction market settlement.
     Aggregates prices from Binance, Coinbase, and Kraken using multi-venue median pricing.
@@ -73,9 +73,11 @@ paths:
                 $ref: '#/components/schemas/Error'
               examples:
                 missingTs:
-                  value: { "error": "ts parameter required (RFC3339 format)" }
+                  value: { "error": "ts parameter required (RFC3339 format, e.g. 2026-03-19T09:05:00Z)" }
+                invalidFormat:
+                  value: { "error": "invalid ts format, use RFC3339 (e.g. 2026-03-19T09:05:00Z)" }
                 invalidBoundary:
-                  value: { "error": "ts must be on a 5-minute boundary" }
+                  value: { "error": "ts must be on a 5-minute boundary (e.g. 09:05:00, 09:10:00)" }
                 futureTs:
                   value: { "error": "ts cannot be in the future" }
         '404':
@@ -433,3 +435,70 @@ components:
         error:
           type: string
           description: Error message
+
+    # WebSocket message schemas (informational — not served via REST)
+    WSMessage:
+      type: object
+      description: |
+        Base schema for all WebSocket messages. The `type` field determines which
+        additional fields are present.
+      required: [type, ts]
+      properties:
+        type:
+          type: string
+          enum: [welcome, latest_price, snapshot_1s, heartbeat]
+          description: Message type
+        seq:
+          type: integer
+          format: uint64
+          description: |
+            Monotonically increasing sequence number. Present on all broadcast
+            messages (latest_price, snapshot_1s, heartbeat). Absent on per-connection
+            messages (welcome, initial_state). Clients detect gaps to know when
+            messages were missed.
+        ts:
+          type: string
+          format: date-time
+          description: Timestamp of the event or server time
+        price:
+          type: string
+          description: Canonical price (decimal string). Present on latest_price and snapshot_1s.
+        basis:
+          type: string
+          enum: [median_trade, median_mixed, single_trade, single_midpoint, carry_forward]
+        is_stale:
+          type: boolean
+        quality_score:
+          type: string
+          description: Quality metric as decimal string
+        source_count:
+          type: integer
+        sources_used:
+          type: array
+          items:
+            type: string
+        message:
+          type: string
+          description: |
+            Context for special messages:
+            - `"btick/v1"` on welcome
+            - `"initial_state"` on first latest_price after connect
+            - `"no_data_yet"` if no price data available on connect
+
+    WSClientAction:
+      type: object
+      description: |
+        Client-to-server message for subscription management.
+        Unknown actions and types are silently ignored (forward-compatible).
+      required: [action, types]
+      properties:
+        action:
+          type: string
+          enum: [subscribe, unsubscribe]
+          description: Subscribe or unsubscribe from message types
+        types:
+          type: array
+          items:
+            type: string
+            enum: [snapshot_1s, latest_price, heartbeat]
+          description: Message types to subscribe/unsubscribe

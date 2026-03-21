@@ -1,4 +1,4 @@
-# BTC Price Tick
+# btick
 
 Real-time Bitcoin price oracle for prediction market settlement.
 
@@ -8,7 +8,7 @@ Real-time Bitcoin price oracle for prediction market settlement.
 
 ## Overview
 
-BTC Price Tick aggregates real-time trade data from multiple exchanges and produces a canonical, manipulation-resistant BTC/USD price. Designed for prediction markets that need reliable settlement prices.
+btick aggregates real-time trade data from multiple exchanges and produces a canonical, manipulation-resistant BTC/USD price. Designed for prediction markets that need reliable settlement prices.
 
 ### Features
 
@@ -30,15 +30,15 @@ BTC Price Tick aggregates real-time trade data from multiple exchanges and produ
 
 ```bash
 # Clone
-git clone https://github.com/justar9/btc-price-tick.git
-cd btc-price-tick
+git clone https://github.com/justar9/btick.git
+cd btick
 
 # Setup config
 cp config.yaml.example config.yaml
 # Edit config.yaml with your DATABASE_URL
 
 # Run
-go run ./cmd/btctick
+go run ./cmd/btick
 ```
 
 ### Run with Railway
@@ -51,7 +51,7 @@ npm install -g @railway/cli
 railway link
 
 # Run locally with Railway's database
-railway run go run ./cmd/btctick
+railway run go run ./cmd/btick
 ```
 
 ### Verify It's Working
@@ -152,9 +152,9 @@ See [config.yaml.example](config.yaml.example) for full options.
 ## Project Structure
 
 ```
-btc-price-tick/
+btick/
 ├── cmd/
-│   └── btctick/          # Main entry point
+│   └── btick/          # Main entry point
 ├── internal/
 │   ├── adapter/          # Exchange WebSocket adapters
 │   ├── api/              # HTTP/WebSocket server
@@ -188,7 +188,7 @@ air
 ### Build Binary
 
 ```bash
-go build -o btctick ./cmd/btctick
+go build -o btick ./cmd/btick
 ```
 
 ## Deployment
@@ -202,8 +202,8 @@ railway up
 ### Docker
 
 ```bash
-docker build -t btc-price-tick .
-docker run -e DATABASE_URL=... -p 8080:8080 btc-price-tick
+docker build -t btick .
+docker run -e DATABASE_URL=... -p 8080:8080 btick
 ```
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production setup.

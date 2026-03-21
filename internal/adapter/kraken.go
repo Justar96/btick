@@ -9,7 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shopspring/decimal"
 
-	"github.com/justar9/btc-price-tick/internal/domain"
+	"github.com/justar9/btick/internal/domain"
 )
 
 // KrakenAdapter handles Kraken WebSocket v2 trade and ticker channels.

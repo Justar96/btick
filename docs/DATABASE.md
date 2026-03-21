@@ -2,11 +2,11 @@
 
 ## Overview
 
-BTC Price Tick uses PostgreSQL 14+ for persistent storage. The schema is designed for:
-- High-throughput event ingestion
-- Fast time-range queries
+btick uses PostgreSQL 17+ with TimescaleDB 2.17+ for persistent storage. The schema is designed for:
+- High-throughput event ingestion via TimescaleDB hypertables
+- Fast time-range queries with automatic chunk management
 - Immutable audit trail
-- Optional TimescaleDB support
+- Compressed storage with continuous aggregates
 
 ---
 
@@ -18,23 +18,26 @@ Stores every normalized event from exchange feeds. Primary source of truth for a
 
 ```sql
 CREATE TABLE raw_ticks (
-    event_id              UUID PRIMARY KEY,        -- UUID v7 (time-ordered)
-    source                TEXT NOT NULL,           -- 'binance', 'coinbase', 'kraken'
-    symbol_native         TEXT NOT NULL,           -- Exchange symbol: 'btcusdt', 'BTC-USD'
-    symbol_canonical      TEXT NOT NULL,           -- Canonical: 'BTC/USD'
-    event_type            TEXT NOT NULL,           -- 'trade' or 'ticker'
-    exchange_ts           TIMESTAMPTZ NOT NULL,    -- Timestamp from exchange
-    recv_ts               TIMESTAMPTZ NOT NULL,    -- When we received it
-    price                 NUMERIC(20,8),           -- Trade price (nullable for ticker)
-    size                  NUMERIC(28,12),          -- Trade size
-    side                  TEXT,                    -- 'buy' or 'sell'
-    trade_id              TEXT,                    -- Exchange trade ID
-    sequence              TEXT,                    -- Sequence number if provided
-    bid                   NUMERIC(20,8),           -- Best bid (ticker only)
-    ask                   NUMERIC(20,8),           -- Best ask (ticker only)
-    raw_payload           JSONB NOT NULL,          -- Original message for audit
-    ingest_partition_date DATE DEFAULT CURRENT_DATE
+    event_id              UUID NOT NULL,            -- UUID v7 (time-ordered)
+    source                TEXT NOT NULL,            -- 'binance', 'coinbase', 'kraken'
+    symbol_native         TEXT NOT NULL,            -- Exchange symbol: 'btcusdt', 'BTC-USD'
+    symbol_canonical      TEXT NOT NULL,            -- Canonical: 'BTC/USD'
+    event_type            TEXT NOT NULL,            -- 'trade' or 'ticker'
+    exchange_ts           TIMESTAMPTZ NOT NULL,     -- Timestamp from exchange (hypertable time column)
+    recv_ts               TIMESTAMPTZ NOT NULL,     -- When we received it
+    price                 NUMERIC(20,8),            -- Trade price (nullable for ticker)
+    size                  NUMERIC(28,12),           -- Trade size
+    side                  TEXT,                     -- 'buy' or 'sell'
+    trade_id              TEXT,                     -- Exchange trade ID
+    sequence              TEXT,                     -- Sequence number if provided
+    bid                   NUMERIC(20,8),            -- Best bid (ticker only)
+    ask                   NUMERIC(20,8),            -- Best ask (ticker only)
+    raw_payload           JSONB NOT NULL,           -- Original message for audit
+    ingest_partition_date DATE NOT NULL DEFAULT CURRENT_DATE
 );
+-- Converted to TimescaleDB hypertable:
+SELECT create_hypertable('raw_ticks', 'exchange_ts',
+    chunk_time_interval => INTERVAL '1 hour');
 ```
 
 **Indexes:**
@@ -42,19 +45,25 @@ CREATE TABLE raw_ticks (
 -- Query by symbol and time
 CREATE INDEX idx_raw_ticks_symbol_ts ON raw_ticks (symbol_canonical, exchange_ts DESC);
 
--- Query by source and time
-CREATE INDEX idx_raw_ticks_source_ts ON raw_ticks (source, exchange_ts DESC);
-
--- Deduplication by trade ID
-CREATE UNIQUE INDEX idx_raw_ticks_source_trade ON raw_ticks (source, trade_id) 
+-- Deduplication by trade ID (includes exchange_ts for hypertable compatibility)
+CREATE UNIQUE INDEX idx_raw_ticks_source_trade ON raw_ticks (source, trade_id, exchange_ts)
     WHERE trade_id IS NOT NULL;
+```
+
+**Compression:**
+```sql
+ALTER TABLE raw_ticks SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'source, symbol_canonical',
+    timescaledb.compress_orderby = 'exchange_ts DESC');
+SELECT add_compression_policy('raw_ticks', INTERVAL '2 hours');
 ```
 
 **Row Size:** ~500 bytes average (depends on raw_payload)
 
 **Growth Rate:** ~1-5 million rows/day
 
-**Retention:** 14 days (configurable)
+**Retention:** 1 day (configurable, set via `raw_retention_days` or TimescaleDB retention policy)
 
 ---
 
@@ -64,22 +73,26 @@ Stores every canonical price change. More compact than raw_ticks.
 
 ```sql
 CREATE TABLE canonical_ticks (
-    tick_id              UUID PRIMARY KEY,         -- UUID v7
-    ts_event             TIMESTAMPTZ NOT NULL,     -- Timestamp of price change
-    canonical_symbol     TEXT NOT NULL,            -- 'BTC/USD'
-    canonical_price      NUMERIC(20,8) NOT NULL,   -- Computed canonical price
-    basis                TEXT NOT NULL,            -- How price was computed
-    is_stale             BOOLEAN NOT NULL,         -- True if carry-forward
-    is_degraded          BOOLEAN NOT NULL,         -- True if < min sources
-    quality_score        NUMERIC(5,4) NOT NULL,    -- 0.0000 to 1.0000
-    source_count         INTEGER NOT NULL,         -- Number of sources used
-    sources_used         TEXT[] NOT NULL,          -- ['binance', 'coinbase']
-    source_details_json  JSONB NOT NULL            -- Per-source breakdown
+    tick_id              UUID NOT NULL,             -- UUID v7
+    ts_event             TIMESTAMPTZ NOT NULL,      -- Timestamp of price change (hypertable time column)
+    canonical_symbol     TEXT NOT NULL,             -- 'BTC/USD'
+    canonical_price      NUMERIC(20,8) NOT NULL,    -- Computed canonical price
+    basis                TEXT NOT NULL,             -- How price was computed
+    is_stale             BOOLEAN NOT NULL,          -- True if carry-forward
+    is_degraded          BOOLEAN NOT NULL,          -- True if < min sources
+    quality_score        NUMERIC(5,4) NOT NULL,     -- 0.0000 to 1.0000
+    source_count         INTEGER NOT NULL,          -- Number of sources used
+    sources_used         TEXT[] NOT NULL,           -- ['binance', 'coinbase']
+    source_details_json  JSONB NOT NULL             -- Per-source breakdown
 );
+-- Converted to TimescaleDB hypertable:
+SELECT create_hypertable('canonical_ticks', 'ts_event',
+    chunk_time_interval => INTERVAL '1 day');
 ```
 
 **Indexes:**
 ```sql
+CREATE UNIQUE INDEX idx_canonical_ticks_id ON canonical_ticks (tick_id, ts_event);
 CREATE INDEX idx_canonical_ticks_ts ON canonical_ticks (ts_event DESC);
 ```
 
@@ -92,6 +105,8 @@ CREATE INDEX idx_canonical_ticks_ts ON canonical_ticks (ts_event DESC);
 | `single_midpoint` | Only midpoint available |
 | `carry_forward` | No fresh data, carried |
 
+**Retention:** 1 day (configurable, set via `canonical_retention_days` or TimescaleDB retention policy)
+
 **Growth Rate:** ~5,000-10,000 rows/day
 
 ---
@@ -102,7 +117,7 @@ Immutable 1-second price snapshots. **Primary table for settlement queries.**
 
 ```sql
 CREATE TABLE snapshots_1s (
-    ts_second               TIMESTAMPTZ PRIMARY KEY,  -- Second boundary
+    ts_second               TIMESTAMPTZ NOT NULL,     -- Second boundary (hypertable time column)
     canonical_symbol        TEXT NOT NULL,
     canonical_price         NUMERIC(20,8) NOT NULL,
     basis                   TEXT NOT NULL,
@@ -113,14 +128,27 @@ CREATE TABLE snapshots_1s (
     sources_used            TEXT[] NOT NULL,
     source_details_json     JSONB NOT NULL,
     last_event_exchange_ts  TIMESTAMPTZ,              -- Latest event in window
-    finalized_at            TIMESTAMPTZ NOT NULL      -- When snapshot was created
+    finalized_at            TIMESTAMPTZ NOT NULL,     -- When snapshot was created
+    UNIQUE (ts_second)
 );
+-- Converted to TimescaleDB hypertable:
+SELECT create_hypertable('snapshots_1s', 'ts_second',
+    chunk_time_interval => INTERVAL '1 day');
 ```
 
 **Key Properties:**
-- Primary key on `ts_second` ensures one row per second
-- Rows are **never updated** after creation
+- `UNIQUE` constraint on `ts_second` ensures one row per second
+- Rows are **never updated** after creation (insert uses `ON CONFLICT DO NOTHING`)
 - `finalized_at` is typically 250ms after `ts_second`
+
+**Compression:**
+```sql
+ALTER TABLE snapshots_1s SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'canonical_symbol',
+    timescaledb.compress_orderby = 'ts_second DESC');
+SELECT add_compression_policy('snapshots_1s', INTERVAL '1 day');
+```
 
 **Growth Rate:** 86,400 rows/day (fixed)
 
@@ -220,10 +248,10 @@ Structured data stored as JSONB:
 | Table | Index | Type | Purpose |
 |-------|-------|------|---------|
 | raw_ticks | `idx_raw_ticks_symbol_ts` | B-tree | Query by symbol + time |
-| raw_ticks | `idx_raw_ticks_source_ts` | B-tree | Query by source + time |
-| raw_ticks | `idx_raw_ticks_source_trade` | Unique partial | Deduplication |
+| raw_ticks | `idx_raw_ticks_source_trade` | Unique partial | Deduplication (`source, trade_id, exchange_ts`) |
+| canonical_ticks | `idx_canonical_ticks_id` | Unique | PK equivalent (`tick_id, ts_event`) |
 | canonical_ticks | `idx_canonical_ticks_ts` | B-tree | Time-range queries |
-| snapshots_1s | PRIMARY KEY | B-tree | Direct timestamp lookup |
+| snapshots_1s | `UNIQUE (ts_second)` | B-tree | Direct timestamp lookup |
 
 ### Recommended Additional Indexes
 
@@ -239,59 +267,90 @@ CREATE INDEX idx_snapshots_degraded ON snapshots_1s (ts_second)
 
 ---
 
-## Partitioning
+## Hypertables & Compression
 
-### Option 1: Native PostgreSQL Partitioning
+All time-series tables are TimescaleDB hypertables (required).
+
+| Table | Chunk Interval | Compression Segmentby | Compression Orderby | Compress After |
+|-------|----------------|----------------------|--------------------|---------|
+| `raw_ticks` | 1 hour | `source, symbol_canonical` | `exchange_ts DESC` | 2 hours |
+| `canonical_ticks` | 1 day | — | — | None (short retention) |
+| `snapshots_1s` | 1 day | `canonical_symbol` | `ts_second DESC` | 1 day |
+
+## Continuous Aggregates
+
+### ohlcv_1m
+
+1-minute OHLCV candles per source, computed from `raw_ticks` trades.
 
 ```sql
-CREATE TABLE raw_ticks (
-    ...
-) PARTITION BY RANGE (exchange_ts);
-
-CREATE TABLE raw_ticks_2026_03 PARTITION OF raw_ticks
-    FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
+CREATE MATERIALIZED VIEW ohlcv_1m
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 minute', exchange_ts) AS bucket,
+    source,
+    symbol_canonical,
+    first(price, exchange_ts) AS open,
+    max(price) AS high,
+    min(price) AS low,
+    last(price, exchange_ts) AS close,
+    sum(size) AS volume,
+    count(*) AS trade_count
+FROM raw_ticks
+WHERE event_type = 'trade' AND price IS NOT NULL
+GROUP BY bucket, source, symbol_canonical
+WITH NO DATA;
 ```
 
-### Option 2: TimescaleDB (Recommended for Production)
+**Policies:** Refresh every 1 minute (1-hour start offset, 1-minute end offset). Compressed after 2 hours.
+
+### snapshot_rollups_1h
+
+Hourly rollups of 1-second snapshots with quality and availability metrics.
 
 ```sql
--- Convert to hypertable
-SELECT create_hypertable('raw_ticks', 'exchange_ts', 
-    chunk_time_interval => INTERVAL '1 day',
-    if_not_exists => TRUE
-);
-
--- Enable compression for older data
-ALTER TABLE raw_ticks SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'source'
-);
-
--- Add compression policy
-SELECT add_compression_policy('raw_ticks', INTERVAL '7 days');
+CREATE MATERIALIZED VIEW snapshot_rollups_1h
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', ts_second) AS bucket,
+    canonical_symbol,
+    first(canonical_price, ts_second) AS open,
+    max(canonical_price) AS high,
+    min(canonical_price) AS low,
+    last(canonical_price, ts_second) AS close,
+    avg(quality_score) AS avg_quality_score,
+    avg(source_count)::NUMERIC(10,4) AS avg_source_count,
+    count(*) AS snapshot_count,
+    count(*) FILTER (WHERE is_stale) AS stale_count,
+    count(*) FILTER (WHERE is_degraded) AS degraded_count
+FROM snapshots_1s
+GROUP BY bucket, canonical_symbol
+WITH NO DATA;
 ```
+
+**Policies:** Refresh every 5 minutes (7-day start offset, 5-minute end offset). Compressed after 14 days.
 
 ---
 
 ## Retention Policies
 
-### Manual Cleanup
+### TimescaleDB Retention (Active)
 
 ```sql
--- Delete raw ticks older than 14 days
-DELETE FROM raw_ticks 
-WHERE exchange_ts < NOW() - INTERVAL '14 days';
-
--- Delete canonical ticks older than 30 days
-DELETE FROM canonical_ticks 
-WHERE ts_event < NOW() - INTERVAL '30 days';
+SELECT add_retention_policy('raw_ticks', INTERVAL '1 day');
+SELECT add_retention_policy('canonical_ticks', INTERVAL '1 day');
+SELECT add_retention_policy('snapshots_1s', INTERVAL '365 days');
 ```
 
-### TimescaleDB Retention
+### Manual Cleanup (Fallback)
+
+The retention pruner (`internal/storage/pruner.go`) auto-detects TimescaleDB and becomes a no-op when native retention policies are available. Without TimescaleDB, it performs batched deletes:
 
 ```sql
-SELECT add_retention_policy('raw_ticks', INTERVAL '14 days');
-SELECT add_retention_policy('canonical_ticks', INTERVAL '30 days');
+-- Batched delete (10k rows per iteration)
+DELETE FROM raw_ticks WHERE ctid IN (
+    SELECT ctid FROM raw_ticks WHERE exchange_ts < $cutoff LIMIT 10000
+);
 ```
 
 ---
@@ -394,7 +453,7 @@ ORDER BY 2 DESC;
 
 ## Migrations
 
-Migrations are stored in `/migrations/` and run automatically on startup when `run_migrations: true` in config.
+Migrations are stored in `/migrations/` and run automatically on startup when `run_migrations: true` in config. The migration loader searches for `migrations/*.sql` files in common relative paths and executes all files in sorted order.
 
 ### Running Manually
 
@@ -410,4 +469,5 @@ railway run psql -f migrations/001_init.sql
 
 1. Create file: `migrations/002_add_index.sql`
 2. Add idempotent DDL: `CREATE INDEX IF NOT EXISTS ...`
-3. Restart service with `run_migrations: true`
+3. Use `DO $$ ... EXCEPTION WHEN OTHERS ... END $$;` for non-idempotent DDL
+4. Restart service with `run_migrations: true`

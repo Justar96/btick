@@ -5,8 +5,17 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/justar9/btc-price-tick/internal/domain"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/justar9/btick/internal/domain"
 )
+
+const insertCanonicalTickQuery = `INSERT INTO canonical_ticks (
+	tick_id, ts_event, canonical_symbol, canonical_price, basis,
+	is_stale, is_degraded, quality_score, source_count,
+	sources_used, source_details_json
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+ON CONFLICT DO NOTHING`
 
 // InsertSnapshot writes a finalized 1-second snapshot.
 func (db *DB) InsertSnapshot(ctx context.Context, s domain.Snapshot1s) error {
@@ -27,19 +36,38 @@ func (db *DB) InsertSnapshot(ctx context.Context, s domain.Snapshot1s) error {
 
 // InsertCanonicalTick writes a canonical price change event.
 func (db *DB) InsertCanonicalTick(ctx context.Context, t domain.CanonicalTick) error {
-	const q = `INSERT INTO canonical_ticks (
-		tick_id, ts_event, canonical_symbol, canonical_price, basis,
-		is_stale, is_degraded, quality_score, source_count,
-		sources_used, source_details_json
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-	ON CONFLICT DO NOTHING`
-
-	_, err := db.Pool.Exec(ctx, q,
+	_, err := db.Pool.Exec(ctx, insertCanonicalTickQuery,
 		t.TickID, t.TSEvent, t.CanonicalSymbol, t.CanonicalPrice, t.Basis,
 		t.IsStale, t.IsDegraded, t.QualityScore, t.SourceCount,
 		t.SourcesUsed, t.SourceDetailsJSON,
 	)
 	return err
+}
+
+// InsertCanonicalTicks writes canonical price change events in a single batch.
+func (db *DB) InsertCanonicalTicks(ctx context.Context, ticks []domain.CanonicalTick) error {
+	if len(ticks) == 0 {
+		return nil
+	}
+
+	var batch pgx.Batch
+	for _, t := range ticks {
+		batch.Queue(insertCanonicalTickQuery,
+			t.TickID, t.TSEvent, t.CanonicalSymbol, t.CanonicalPrice, t.Basis,
+			t.IsStale, t.IsDegraded, t.QualityScore, t.SourceCount,
+			t.SourcesUsed, t.SourceDetailsJSON,
+		)
+	}
+
+	results := db.Pool.SendBatch(ctx, &batch)
+	for range ticks {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close()
+			return err
+		}
+	}
+
+	return results.Close()
 }
 
 // UpsertFeedHealth updates per-source feed health state.

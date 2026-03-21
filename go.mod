@@ -1,4 +1,4 @@
-module github.com/justar9/btc-price-tick
+module github.com/justar9/btick
 
 go 1.23
 

@@ -4,8 +4,8 @@
 *.dll
 *.so
 *.dylib
-/btctick
-/cmd/btctick/btctick
+/btick
+/cmd/btick/btick
 
 # Test binary, built with `go test -c`
 *.test

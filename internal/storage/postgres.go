@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/justar9/btc-price-tick/internal/config"
+	"github.com/justar9/btick/internal/config"
 )
 
 // DB wraps a pgx connection pool.
@@ -55,62 +57,96 @@ func (db *DB) Close() {
 }
 
 func (db *DB) runMigrations(ctx context.Context) error {
-	// Look for migration files in common locations
-	migrationPaths := []string{
-		"migrations/001_init.sql",
-		"../migrations/001_init.sql",
-		"../../migrations/001_init.sql",
+	// Look for migration files in common locations.
+	migrationGlobs := []string{
+		"migrations/*.sql",
+		"../migrations/*.sql",
+		"../../migrations/*.sql",
 	}
 
-	var sql []byte
-	var err error
-	for _, p := range migrationPaths {
-		sql, err = os.ReadFile(p)
-		if err == nil {
+	var migrationFiles []string
+	seen := make(map[string]struct{})
+	for _, pattern := range migrationGlobs {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return fmt.Errorf("glob migrations %q: %w", pattern, err)
+		}
+		sort.Strings(matches)
+		for _, match := range matches {
+			absPath, err := filepath.Abs(match)
+			if err != nil {
+				return fmt.Errorf("resolve migration path %q: %w", match, err)
+			}
+			if _, ok := seen[absPath]; ok {
+				continue
+			}
+			seen[absPath] = struct{}{}
+			migrationFiles = append(migrationFiles, match)
+		}
+		if len(migrationFiles) > 0 {
 			break
 		}
 	}
-	if err != nil {
-		db.logger.Warn("migration file not found, skipping", "error", err)
+
+	if len(migrationFiles) == 0 {
+		db.logger.Warn("migration files not found, skipping")
 		return nil
 	}
 
-	// Split into individual statements and execute
-	stmts := splitStatements(string(sql))
-	for _, stmt := range stmts {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" || strings.HasPrefix(stmt, "--") {
-			continue
+	for _, path := range migrationFiles {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read migration %q: %w", path, err)
 		}
-		if _, err := db.Pool.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("exec migration: %w\nstatement: %s", err, stmt)
+		stmts := splitSQL(string(raw))
+		for i, stmt := range stmts {
+			if _, err := db.Pool.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("exec migration %q stmt %d: %w", path, i+1, err)
+			}
 		}
 	}
 
-	db.logger.Info("migrations applied successfully")
+	db.logger.Info("migrations applied successfully", "files", migrationFiles)
 	return nil
 }
 
-func splitStatements(sql string) []string {
-	// Simple statement splitter on semicolons, respecting comments
+// splitSQL splits a SQL file into individual statements, respecting
+// dollar-quoted blocks (DO $$ ... $$;) so they aren't broken apart.
+func splitSQL(sql string) []string {
 	var stmts []string
-	var current strings.Builder
+	var buf strings.Builder
+	inDollar := false
 	lines := strings.Split(sql, "\n")
-
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "--") {
+		if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+			if inDollar {
+				buf.WriteString(line)
+				buf.WriteByte('\n')
+			}
 			continue
 		}
-		current.WriteString(line)
-		current.WriteString("\n")
+		buf.WriteString(line)
+		buf.WriteByte('\n')
 
-		if strings.HasSuffix(trimmed, ";") {
-			stmts = append(stmts, current.String())
-			current.Reset()
+		// Track DO $$ ... END $$; blocks.
+		upper := strings.ToUpper(trimmed)
+		if !inDollar && strings.Contains(upper, "DO $$") {
+			inDollar = true
+		}
+		if inDollar && strings.Contains(trimmed, "END $$;") {
+			inDollar = false
+			stmts = append(stmts, strings.TrimSpace(buf.String()))
+			buf.Reset()
+			continue
+		}
+
+		if !inDollar && strings.HasSuffix(trimmed, ";") {
+			stmts = append(stmts, strings.TrimSpace(buf.String()))
+			buf.Reset()
 		}
 	}
-	if s := strings.TrimSpace(current.String()); s != "" {
+	if s := strings.TrimSpace(buf.String()); s != "" {
 		stmts = append(stmts, s)
 	}
 	return stmts

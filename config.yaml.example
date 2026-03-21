@@ -3,6 +3,11 @@ canonical_symbol: BTC/USD
 server:
   http_addr: ":8080"
   ws_path: /ws/price
+  ws:
+    send_buffer_size: 256
+    heartbeat_interval_sec: 5
+    ping_interval_sec: 30
+    read_deadline_sec: 60
 
 database:
   dsn: "${DATABASE_URL}"
@@ -48,8 +53,8 @@ storage:
   raw_retention_days: 1
   canonical_retention_days: 1
   snapshots_retention_days: 365
-  batch_insert_max_rows: 1000
-  batch_insert_max_delay_ms: 200
+  batch_insert_max_rows: 2000
+  batch_insert_max_delay_ms: 100
 
 health:
   source_stale_after_ms: 3000

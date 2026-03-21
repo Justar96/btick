@@ -12,13 +12,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/justar9/btc-price-tick/internal/adapter"
-	"github.com/justar9/btc-price-tick/internal/api"
-	"github.com/justar9/btc-price-tick/internal/config"
-	"github.com/justar9/btc-price-tick/internal/domain"
-	"github.com/justar9/btc-price-tick/internal/engine"
-	"github.com/justar9/btc-price-tick/internal/normalizer"
-	"github.com/justar9/btc-price-tick/internal/storage"
+	"github.com/justar9/btick/internal/adapter"
+	"github.com/justar9/btick/internal/api"
+	"github.com/justar9/btick/internal/config"
+	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/engine"
+	"github.com/justar9/btick/internal/normalizer"
+	"github.com/justar9/btick/internal/storage"
 )
 
 // safeGo runs fn in a goroutine with panic recovery. On panic it logs the
@@ -52,7 +52,7 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	logger.Info("btc-price-tick starting", "config", *configPath)
+	logger.Info("btick starting", "config", *configPath)
 
 	// Load config
 	cfg, err := config.Load(*configPath)
@@ -211,7 +211,7 @@ func main() {
 	}
 
 	// API server
-	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, db, eng, logger)
+	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, db, eng, logger)
 	safeGo(&wg, cancel, logger, "api-server", func() {
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("API server error", "error", err)
@@ -225,7 +225,7 @@ func main() {
 
 	// Wait for shutdown
 	wg.Wait()
-	logger.Info("btc-price-tick stopped")
+	logger.Info("btick stopped")
 }
 
 func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- domain.RawEvent, logger *slog.Logger) {

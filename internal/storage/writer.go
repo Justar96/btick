@@ -8,8 +8,16 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/justar9/btc-price-tick/internal/domain"
+	"github.com/justar9/btick/internal/domain"
 )
+
+const insertRawTickQuery = `INSERT INTO raw_ticks (
+	event_id, source, symbol_native, symbol_canonical,
+	event_type, exchange_ts, recv_ts, price, size,
+	side, trade_id, sequence, bid, ask,
+	raw_payload, ingest_partition_date
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+ON CONFLICT DO NOTHING`
 
 // Writer batches raw events and writes them to PostgreSQL.
 type Writer struct {
@@ -83,9 +91,9 @@ func (w *Writer) flush(ctx context.Context) {
 
 	start := time.Now()
 
-	rows := make([][]interface{}, 0, len(batch))
+	var pgxBatch pgx.Batch
 	for _, e := range batch {
-		rows = append(rows, []interface{}{
+		pgxBatch.Queue(insertRawTickQuery,
 			e.EventID,
 			e.Source,
 			e.SymbolNative,
@@ -102,67 +110,27 @@ func (w *Writer) flush(ctx context.Context) {
 			e.Ask,
 			e.RawPayload,
 			e.ExchangeTS.Format("2006-01-02"),
-		})
-	}
-
-	cols := []string{
-		"event_id", "source", "symbol_native", "symbol_canonical",
-		"event_type", "exchange_ts", "recv_ts", "price", "size",
-		"side", "trade_id", "sequence", "bid", "ask",
-		"raw_payload", "ingest_partition_date",
-	}
-
-	// Use temp table + COPY + INSERT ... ON CONFLICT to get bulk speed
-	// with duplicate handling. CopyFrom alone cannot handle ON CONFLICT.
-	tx, err := w.db.Pool.Begin(ctx)
-	if err != nil {
-		w.logger.Error("begin tx failed, falling back to individual inserts",
-			"error", err,
-			"batch_size", len(batch),
 		)
-		w.insertIndividually(ctx, batch)
-		return
-	}
-	defer tx.Rollback(ctx)
-
-	_, err = tx.Exec(ctx, `CREATE TEMP TABLE _stage (
-		event_id UUID, source TEXT, symbol_native TEXT, symbol_canonical TEXT,
-		event_type TEXT, exchange_ts TIMESTAMPTZ, recv_ts TIMESTAMPTZ,
-		price NUMERIC(20,8), size NUMERIC(28,12), side TEXT,
-		trade_id TEXT, sequence TEXT, bid NUMERIC(20,8), ask NUMERIC(20,8),
-		raw_payload JSONB, ingest_partition_date DATE
-	) ON COMMIT DROP`)
-	if err != nil {
-		w.logger.Error("create staging table failed, falling back to individual inserts",
-			"error", err,
-			"batch_size", len(batch),
-		)
-		w.insertIndividually(ctx, batch)
-		return
 	}
 
-	_, err = tx.CopyFrom(ctx, pgx.Identifier{"_stage"}, cols, pgx.CopyFromRows(rows))
-	if err != nil {
-		w.logger.Error("copy to staging table failed, falling back to individual inserts",
-			"error", err,
-			"batch_size", len(batch),
-		)
-		w.insertIndividually(ctx, batch)
-		return
+	results := w.db.Pool.SendBatch(ctx, &pgxBatch)
+	inserted := int64(0)
+	for range batch {
+		tag, err := results.Exec()
+		if err != nil {
+			_ = results.Close()
+			w.logger.Error("batched insert failed, falling back to individual inserts",
+				"error", err,
+				"batch_size", len(batch),
+			)
+			w.insertIndividually(ctx, batch)
+			return
+		}
+		inserted += tag.RowsAffected()
 	}
 
-	tag, err := tx.Exec(ctx, `INSERT INTO raw_ticks SELECT * FROM _stage ON CONFLICT DO NOTHING`)
-	if err != nil {
-		w.logger.Error("merge from staging failed, falling back to individual inserts",
-			"error", err,
-			"batch_size", len(batch),
-		)
-		w.insertIndividually(ctx, batch)
-		return
-	}
-
-	if err = tx.Commit(ctx); err != nil {
-		w.logger.Error("commit failed, falling back to individual inserts",
+	if err := results.Close(); err != nil {
+		w.logger.Error("batch close failed, falling back to individual inserts",
 			"error", err,
 			"batch_size", len(batch),
 		)
@@ -173,23 +141,15 @@ func (w *Writer) flush(ctx context.Context) {
 	elapsed := time.Since(start)
 	w.logger.Debug("batch flushed",
 		"rows", len(batch),
-		"inserted", tag.RowsAffected(),
+		"inserted", inserted,
 		"elapsed", elapsed,
 	)
 }
 
 func (w *Writer) insertIndividually(ctx context.Context, batch []domain.RawEvent) {
-	const q = `INSERT INTO raw_ticks (
-		event_id, source, symbol_native, symbol_canonical,
-		event_type, exchange_ts, recv_ts, price, size,
-		side, trade_id, sequence, bid, ask,
-		raw_payload, ingest_partition_date
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-	ON CONFLICT DO NOTHING`
-
 	inserted := 0
 	for _, e := range batch {
-		_, err := w.db.Pool.Exec(ctx, q,
+		_, err := w.db.Pool.Exec(ctx, insertRawTickQuery,
 			e.EventID, e.Source, e.SymbolNative, e.SymbolCanonical,
 			e.EventType, e.ExchangeTS, e.RecvTS, e.Price, e.Size,
 			e.Side, e.TradeID, e.Sequence, e.Bid, e.Ask,

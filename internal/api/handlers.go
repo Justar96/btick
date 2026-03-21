@@ -206,7 +206,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{
 		"status":    status,
-		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"timestamp": s.now().UTC().Format(time.RFC3339Nano),
 	}
 	if latest != nil {
 		resp["latest_price"] = latest.Price.String()
@@ -240,7 +240,7 @@ func (s *Server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Don't allow future timestamps
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	if ts.After(now) {
 		http.Error(w, `{"error":"ts cannot be in the future"}`, http.StatusBadRequest)
 		return

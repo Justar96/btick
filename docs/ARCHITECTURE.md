@@ -2,7 +2,7 @@
 
 ## Overview
 
-BTC Price Tick is a real-time Bitcoin price oracle service designed for prediction market settlement. It aggregates trade data from multiple exchanges and produces a canonical, manipulation-resistant price.
+btick is a real-time Bitcoin price oracle service designed for prediction market settlement. It aggregates trade data from multiple exchanges and produces a canonical, manipulation-resistant price.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -15,46 +15,54 @@ BTC Price Tick is a real-time Bitcoin price oracle service designed for predicti
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                         │
 │         │                │                │                                 │
 │         └────────────────┼────────────────┘                                 │
-│                          │                                                  │
+│                          │ rawCh (10k)                                      │
 │                          ▼                                                  │
 │                 ┌─────────────────┐                                         │
-│                 │   Raw Events    │◄─────── Normalized trade/ticker events  │
-│                 │    Channel      │                                         │
+│                 │   Normalizer    │◄─────── Dedup, UUID v7, symbol mapping  │
 │                 └────────┬────────┘                                         │
-│                          │                                                  │
-│         ┌────────────────┼────────────────┐                                 │
-│         │                │                │                                 │
-│         ▼                ▼                ▼                                 │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                         │
-│  │  Batch      │  │  Snapshot   │  │  Feed       │     Processing Layer    │
-│  │  Writer     │  │  Engine     │  │  Monitor    │                         │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                         │
-│         │                │                │                                 │
-│         │         ┌──────┴──────┐         │                                 │
-│         │         │             │         │                                 │
-│         │         ▼             ▼         │                                 │
-│         │  ┌───────────┐ ┌───────────┐    │                                 │
-│         │  │ Canonical │ │ 1-Second  │    │                                 │
-│         │  │   Ticks   │ │ Snapshots │    │                                 │
-│         │  └─────┬─────┘ └─────┬─────┘    │                                 │
-│         │        │             │          │                                 │
-│         ▼        ▼             ▼          ▼                                 │
-│  ┌──────────────────────────────────────────────┐                          │
-│  │              PostgreSQL Database              │     Storage Layer       │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐  │                          │
-│  │  │raw_ticks │ │canonical │ │ snapshots_1s │  │                          │
-│  │  │          │ │ _ticks   │ │              │  │                          │
-│  │  └──────────┘ └──────────┘ └──────────────┘  │                          │
-│  └──────────────────────────────────────────────┘                          │
+│                          │ normalizedCh (10k)                               │
+│                          ▼                                                  │
+│                 ┌─────────────────┐                                         │
+│                 │    Fan-out      │◄─────── Non-blocking send to both       │
+│                 └───────┬─┬───────┘                                         │
+│                         │ │                                                 │
+│              writerCh   │ │  engineCh                                       │
+│               (10k)     │ │   (10k)                                         │
+│         ┌───────────────┘ └───────────────┐                                 │
+│         │                                 │                                 │
+│         ▼                                 ▼                                 │
+│  ┌─────────────┐                   ┌─────────────┐                         │
+│  │  Batch      │                   │  Snapshot   │     Processing Layer    │
+│  │  Writer     │                   │  Engine     │                         │
+│  └──────┬──────┘                   └──────┬──────┘                         │
+│         │                          ┌──────┴──────┐                         │
+│         │                          │             │                         │
+│         │                          ▼             ▼                         │
+│         │                   ┌───────────┐ ┌───────────┐                    │
+│         │                   │ Canonical │ │ 1-Second  │                    │
+│         │                   │   Ticks   │ │ Snapshots │                    │
+│         │                   └─────┬─────┘ └─────┬─────┘                    │
+│         │                         │             │                          │
+│         ▼                         ▼             ▼                          │
+│  ┌──────────────────────────────────────────────────────┐                  │
+│  │              PostgreSQL + TimescaleDB                 │  Storage Layer  │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐          │                  │
+│  │  │raw_ticks │ │canonical │ │ snapshots_1s │          │                  │
+│  │  │(hyper)   │ │ _ticks   │ │  (hyper)     │          │                  │
+│  │  └──────────┘ └──────────┘ └──────────────┘          │                  │
+│  │  ┌──────────────┐ ┌────────────────────┐             │                  │
+│  │  │ ohlcv_1m     │ │ snapshot_rollups_1h│ (cont. agg) │                  │
+│  │  └──────────────┘ └────────────────────┘             │                  │
+│  └──────────────────────────────────────────────────────┘                  │
 │                          │                                                  │
 │                          ▼                                                  │
-│  ┌──────────────────────────────────────────────┐                          │
-│  │                 API Server                    │     API Layer           │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐  │                          │
-│  │  │   REST   │ │WebSocket │ │  Settlement  │  │                          │
-│  │  │ /v1/...  │ │ /ws/price│ │  Endpoint    │  │                          │
-│  │  └──────────┘ └──────────┘ └──────────────┘  │                          │
-│  └──────────────────────────────────────────────┘                          │
+│  ┌──────────────────────────────────────────────────────┐                  │
+│  │                 API Server                            │  API Layer      │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────────┐          │                  │
+│  │  │   REST   │ │WebSocket │ │  Settlement  │          │                  │
+│  │  │ /v1/...  │ │ /ws/price│ │  Endpoint    │          │                  │
+│  │  └──────────┘ └──────────┘ └──────────────┘          │                  │
+│  └──────────────────────────────────────────────────────┘                  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -79,7 +87,7 @@ Each adapter maintains a persistent WebSocket connection to an exchange and norm
 | Adapter | Exchange | Streams | Auth Required |
 |---------|----------|---------|---------------|
 | `BinanceAdapter` | Binance | `btcusdt@trade`, `btcusdt@bookTicker` | No |
-| `CoinbaseAdapter` | Coinbase Advanced | `market_trades`, `ticker` | Optional JWT |
+| `CoinbaseAdapter` | Coinbase Advanced | `market_trades`, `ticker` | Optional JWT (higher rate limits) |
 | `KrakenAdapter` | Kraken | `trade`, `ticker` | No |
 
 **Location:** `internal/adapter/`
@@ -96,7 +104,19 @@ Each adapter maintains a persistent WebSocket connection to an exchange and norm
 - Connection state tracking
 - Consecutive error counting
 
-### 2. Snapshot Engine
+### 2. Normalizer
+
+Deduplicates raw events, assigns UUID v7 IDs, and maps symbols to canonical form.
+
+**Location:** `internal/normalizer/normalizer.go`
+
+**Responsibilities:**
+- UUID v7 assignment (time-ordered)
+- Trade deduplication via ring-buffer LRU (100k entries, keyed on `source:trade_id`)
+- Symbol mapping to canonical `BTC/USD`
+- Non-blocking output channel send (drops on backpressure)
+
+### 3. Snapshot Engine
 
 The core pricing logic that produces canonical prices.
 
@@ -108,6 +128,8 @@ The core pricing logic that produces canonical prices.
 - Emits canonical ticks on every price change
 - Finalizes 1-second snapshots with watermark delay
 - Handles outlier rejection and quality scoring
+- Batched canonical tick DB writes (128 rows or 100ms flush interval)
+- Pipeline latency histogram logging (per-minute windows)
 
 **Pricing Algorithm:**
 
@@ -131,20 +153,32 @@ The core pricing logic that produces canonical prices.
 5. Mark as stale if carry-forward needed
 ```
 
-### 3. Batch Writer
+### 4. Batch Writer
 
 Efficiently writes raw events to the database.
 
 **Location:** `internal/storage/writer.go`
 
 **Features:**
-- Batches inserts (up to 1000 rows or 200ms)
-- Falls back to individual inserts on conflicts
+- Batches inserts (up to 2000 rows or 100ms, configurable)
+- Uses pgx `SendBatch` for pipelined inserts with `ON CONFLICT DO NOTHING`
+- Falls back to individual inserts on batch failure
 - Non-blocking operation
 
-### 4. API Server
+### 5. Retention Pruner
 
-HTTP/WebSocket server for data access.
+Periodically deletes expired rows to prevent unbounded table growth.
+
+**Location:** `internal/storage/pruner.go`
+
+**Features:**
+- Auto-detects TimescaleDB — becomes a no-op when native `drop_chunks` policies are available
+- Batched deletes (10k rows per batch with 100ms pauses) to avoid long transactions
+- Prunes `raw_ticks`, `canonical_ticks`, and `snapshots_1s`
+
+### 6. API Server
+
+HTTP/WebSocket server for data access. Handlers use `Store` and `Engine` interfaces (not concrete types) for testability — the API package has 100% test coverage.
 
 **Location:** `internal/api/`
 
@@ -155,10 +189,17 @@ HTTP/WebSocket server for data access.
 | `/v1/price/settlement` | REST | Settlement price at 5-min boundary |
 | `/v1/price/snapshots` | REST | Historical snapshots query |
 | `/v1/price/ticks` | REST | Recent canonical ticks |
-| `/v1/price/raw` | REST | Raw exchange data (audit) |
+| `/v1/price/raw` | REST | Raw exchange data (audit/debug) |
 | `/v1/health` | REST | System health |
 | `/v1/health/feeds` | REST | Per-source feed health |
 | `/ws/price` | WebSocket | Real-time price stream |
+
+**WebSocket Hub features:**
+- Welcome message + initial state on connect (no client wait)
+- Global sequence numbers (`atomic.Uint64`) on all broadcasts for gap detection
+- Per-client subscription filtering (subscribe/unsubscribe message types)
+- Application-level heartbeat (default 5s) for liveness during quiet periods
+- Non-blocking send with per-client drop counting and periodic logging
 
 ---
 
@@ -167,9 +208,9 @@ HTTP/WebSocket server for data access.
 ### Ingest Path (Exchange → Database)
 
 ```
-Exchange WS ──► Adapter ──► RawEvent ──► BatchWriter ──► raw_ticks table
-                   │
-                   └──► SnapshotEngine ──► venueState (in-memory)
+Exchange WS ──► Adapter ──► rawCh ──► Normalizer ──► normalizedCh ──► Fan-out
+                                                                       ├──► writerCh ──► BatchWriter ──► raw_ticks table
+                                                                       └──► engineCh ──► SnapshotEngine ──► venueState (in-memory)
 ```
 
 **Latency:** ~50-150ms from exchange to database
@@ -179,15 +220,15 @@ Exchange WS ──► Adapter ──► RawEvent ──► BatchWriter ──►
 ```
 RawEvent ──► SnapshotEngine.updateVenueState()
                    │
-                   ├──► emitTick() ──► canonical_ticks table
+                   ├──► emitTick() ──► ticksToWrite ch ──► runTickWriter ──► canonical_ticks (batched)
                    │         │
-                   │         └──► tickCh ──► WebSocket broadcast
+                   │         └──► tickCh ──► API broadcastLoop ──► WSHub broadcast
                    │
-                   └──► finalizeSnapshot() (every 1s)
+                   └──► finalizeSnapshot() (every 1s, after watermark delay)
                               │
-                              ├──► snapshots_1s table
+                              ├──► snapshots_1s table (direct insert)
                               │
-                              └──► snapshotCh ──► WebSocket broadcast
+                              └──► snapshotCh ──► API broadcastLoop ──► WSHub broadcast
 ```
 
 ### Settlement Query Path
@@ -213,10 +254,11 @@ Market Service ──► GET /v1/price/settlement?ts=...
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Main Goroutine                          │
 │  - Initializes components                                       │
-│  - Waits for shutdown signal                                    │
+│  - Waits for shutdown signal (SIGINT/SIGTERM)                   │
+│  - All goroutines launched via safeGo (panic recovery + cancel) │
 └─────────────────────────────────────────────────────────────────┘
          │
-         │ spawns
+         │ spawns via safeGo
          ▼
 ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
 │ Binance Adapter │  │Coinbase Adapter │  │ Kraken Adapter  │
@@ -225,31 +267,59 @@ Market Service ──► GET /v1/price/settlement?ts=...
 │ - WS read loop  │  │ - WS read loop  │  │ - WS read loop  │
 │ - Ping loop     │  │ - Ping loop     │  │ - Ping loop     │
 │ - Reconnect     │  │ - Reconnect     │  │ - Reconnect     │
+│ - Conn closer   │  │ - Conn closer   │  │ - Conn closer   │
 └────────┬────────┘  └────────┬────────┘  └────────┬────────┘
          │                    │                    │
          └────────────────────┼────────────────────┘
                               │
                               ▼
-                    chan domain.RawEvent
+                    rawCh (10k buffered)
                               │
-         ┌────────────────────┼────────────────────┐
-         │                    │                    │
-         ▼                    ▼                    ▼
+                              ▼
+                    ┌─────────────────┐
+                    │   Normalizer    │  Dedup, UUID v7, symbol map
+                    └────────┬────────┘
+                              │
+                    normalizedCh (10k)
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │    Fan-out      │  Non-blocking send to both
+                    └───────┬─┬───────┘
+                            │ │
+         ┌──────────────────┘ └──────────────────┐
+         │                                       │
+         ▼ writerCh (10k)                        ▼ engineCh (10k)
 ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
 │  BatchWriter    │  │ SnapshotEngine  │  │   API Server    │
 │   goroutine     │  │   goroutine     │  │   goroutines    │
 │                 │  │                 │  │                 │
 │ - Batch timer   │  │ - Event loop    │  │ - HTTP handler  │
-│ - DB writes     │  │ - 1s ticker     │  │ - WS hub        │
-└─────────────────┘  │ - Watermark     │  │ - WS broadcast  │
-                     └─────────────────┘  └─────────────────┘
+│ - pgx SendBatch │  │ - 1s ticker     │  │ - WS hub run    │
+│ - Fallback INS  │  │ - Watermark     │  │   (heartbeat)   │
+└─────────────────┘  │ - Tick writer   │  │ - Broadcast loop│
+                     │   (batched)     │  │ - Per-client:   │
+                     └─────────────────┘  │   writer + reader│
+                                          └─────────────────┘
+
+         ┌─────────────────┐  ┌─────────────────┐
+         │ Retention Pruner│  │ Feed Health     │  Background goroutines
+         │   goroutine     │  │   Updater       │
+         │                 │  │   goroutine     │
+         │ - TimescaleDB   │  │ - Periodic (5s) │
+         │   auto-detect   │  │ - Placeholder   │
+         └─────────────────┘  └─────────────────┘
 ```
 
 **Channel Buffer Sizes:**
-- Raw event channel: 10,000
-- Snapshot channel: 100
-- Tick channel: 1,000
-- WS client send channel: 256
+- Raw event channel (`rawCh`, adapters → normalizer): 10,000
+- Normalized event channel (`normalizedCh`, normalizer → fan-out): 10,000
+- Writer channel (`writerCh`, fan-out → batch writer): 10,000
+- Engine channel (`engineCh`, fan-out → snapshot engine): 10,000
+- Snapshot channel (engine → API broadcast): 100
+- Tick channel (engine → API broadcast): 1,000
+- Canonical tick write buffer (engine → DB writer): 500
+- WS client send channel: 256 (configurable via `server.ws.send_buffer_size`)
 
 ---
 
@@ -261,7 +331,7 @@ Market Service ──► GET /v1/price/settlement?ts=...
 Connection Lost
       │
       ▼
-Exponential Backoff (1s → 2s → 4s → ... → 30s max)
+Exponential Backoff (1s → 2s → 4s → ... → 30s max, with 0.5x-1.5x jitter)
       │
       ▼
 Reconnect Attempt
@@ -278,7 +348,7 @@ Reconnect Attempt
 | 1 exchange down | Continue with 2 sources (degraded) |
 | 2 exchanges down | Continue with 1 source (highly degraded) |
 | All exchanges down | Carry forward last price (stale) |
-| Carry > 10 seconds | Log warning, continue carry |
+| Carry > 10 seconds | Log warning, continue carry (configurable) |
 | Database down | Continue streaming, drop writes |
 
 ### Data Quality Guarantees
@@ -298,7 +368,7 @@ Reconnect Attempt
 | Snapshot finalization | 250ms after second boundary |
 | API response time | <10ms (latest), <50ms (queries) |
 | WebSocket broadcast | <5ms to all clients |
-| Database writes | Batched every 200ms |
+| Database writes | Batched every 100ms or 2000 rows |
 | Memory usage | ~50MB base + 10KB per raw event buffered |
 
 ### Throughput

@@ -18,8 +18,44 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	HTTPAddr string `yaml:"http_addr"`
-	WSPath   string `yaml:"ws_path"`
+	HTTPAddr string   `yaml:"http_addr"`
+	WSPath   string   `yaml:"ws_path"`
+	WS       WSConfig `yaml:"ws"`
+}
+
+type WSConfig struct {
+	SendBufferSize     int `yaml:"send_buffer_size"`
+	HeartbeatIntervalS int `yaml:"heartbeat_interval_sec"`
+	PingIntervalS      int `yaml:"ping_interval_sec"`
+	ReadDeadlineS      int `yaml:"read_deadline_sec"`
+}
+
+func (w WSConfig) SendBuffer() int {
+	if w.SendBufferSize <= 0 {
+		return 256
+	}
+	return w.SendBufferSize
+}
+
+func (w WSConfig) HeartbeatInterval() time.Duration {
+	if w.HeartbeatIntervalS <= 0 {
+		return 5 * time.Second
+	}
+	return time.Duration(w.HeartbeatIntervalS) * time.Second
+}
+
+func (w WSConfig) PingInterval() time.Duration {
+	if w.PingIntervalS <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(w.PingIntervalS) * time.Second
+}
+
+func (w WSConfig) ReadDeadline() time.Duration {
+	if w.ReadDeadlineS <= 0 {
+		return 60 * time.Second
+	}
+	return time.Duration(w.ReadDeadlineS) * time.Second
 }
 
 type DatabaseConfig struct {
@@ -144,10 +180,10 @@ func Load(path string) (*Config, error) {
 		cfg.Storage.CanonicalRetentionDays = cfg.Storage.RawRetentionDays
 	}
 	if cfg.Storage.BatchInsertMaxRows == 0 {
-		cfg.Storage.BatchInsertMaxRows = 1000
+		cfg.Storage.BatchInsertMaxRows = 2000
 	}
 	if cfg.Storage.BatchInsertMaxDelayMs == 0 {
-		cfg.Storage.BatchInsertMaxDelayMs = 200
+		cfg.Storage.BatchInsertMaxDelayMs = 100
 	}
 	if cfg.Health.SourceStaleAfterMs == 0 {
 		cfg.Health.SourceStaleAfterMs = 3000

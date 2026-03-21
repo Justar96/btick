@@ -6,14 +6,18 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/justar9/btick/internal/config"
+	"github.com/justar9/btick/internal/domain"
 )
 
 // WSMessage is a message broadcast to WebSocket clients.
 type WSMessage struct {
 	Type         string   `json:"type"`
+	Seq          uint64   `json:"seq,omitempty"`
 	TS           string   `json:"ts"`
 	Price        string   `json:"price,omitempty"`
 	Basis        string   `json:"basis,omitempty"`
@@ -24,17 +28,74 @@ type WSMessage struct {
 	Message      string   `json:"message,omitempty"`
 }
 
+// subscriptions tracks which message types a client wants.
+type subscriptions struct {
+	mu          sync.RWMutex
+	snapshot1s  bool
+	latestPrice bool
+	heartbeat   bool
+}
+
+func newSubscriptions() *subscriptions {
+	return &subscriptions{
+		snapshot1s:  true,
+		latestPrice: true,
+		heartbeat:   true,
+	}
+}
+
+func (s *subscriptions) wants(msgType string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch msgType {
+	case "snapshot_1s":
+		return s.snapshot1s
+	case "latest_price":
+		return s.latestPrice
+	case "heartbeat":
+		return s.heartbeat
+	default:
+		return true // welcome, unknown types always pass
+	}
+}
+
+func (s *subscriptions) set(msgType string, val bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch msgType {
+	case "snapshot_1s":
+		s.snapshot1s = val
+	case "latest_price":
+		s.latestPrice = val
+	case "heartbeat":
+		s.heartbeat = val
+	}
+}
+
+// clientAction is a message sent from client to server.
+type clientAction struct {
+	Action string   `json:"action"`
+	Types  []string `json:"types"`
+}
+
 // WSHub manages WebSocket client connections and broadcast.
 type WSHub struct {
-	mu      sync.RWMutex
-	clients map[*wsClient]struct{}
-	logger  *slog.Logger
+	mu       sync.RWMutex
+	clients  map[*wsClient]struct{}
+	logger   *slog.Logger
+	wsCfg    config.WSConfig
+	seq      atomic.Uint64
+	getState func() *domain.LatestState
+	marshal  func(v any) ([]byte, error) // overridable for testing
 }
 
 type wsClient struct {
 	conn      *websocket.Conn
 	sendCh    chan []byte
 	closeOnce sync.Once
+	subs      *subscriptions
+	dropCount atomic.Int64
+	logger    *slog.Logger
 }
 
 var upgrader = websocket.Upgrader{
@@ -43,15 +104,33 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-func NewWSHub(logger *slog.Logger) *WSHub {
+func NewWSHub(logger *slog.Logger, wsCfg config.WSConfig, getState func() *domain.LatestState) *WSHub {
 	return &WSHub{
-		clients: make(map[*wsClient]struct{}),
-		logger:  logger.With("component", "ws_hub"),
+		clients:  make(map[*wsClient]struct{}),
+		logger:   logger.With("component", "ws_hub"),
+		wsCfg:    wsCfg,
+		getState: getState,
 	}
 }
 
 func (h *WSHub) Run(ctx context.Context) {
-	<-ctx.Done()
+	ticker := time.NewTicker(h.wsCfg.HeartbeatInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			h.shutdownClients()
+			return
+		case <-ticker.C:
+			h.Broadcast(WSMessage{
+				Type: "heartbeat",
+				TS:   time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		}
+	}
+}
+
+func (h *WSHub) shutdownClients() {
 	h.mu.Lock()
 	for c := range h.clients {
 		close(c.sendCh)
@@ -70,7 +149,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	client := &wsClient{
 		conn:   conn,
-		sendCh: make(chan []byte, 256),
+		sendCh: make(chan []byte, h.wsCfg.SendBuffer()),
+		subs:   newSubscriptions(),
+		logger: h.logger,
 	}
 
 	h.mu.Lock()
@@ -79,6 +160,48 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	h.logger.Info("ws client connected", "total", clientCount)
+
+	// Send welcome message before starting goroutines (no concurrent writer yet).
+	welcome := WSMessage{
+		Type:    "welcome",
+		TS:      time.Now().UTC().Format(time.RFC3339Nano),
+		Message: "btick/v1",
+	}
+	if data, err := json.Marshal(welcome); err == nil {
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		conn.WriteMessage(websocket.TextMessage, data)
+	}
+
+	// Send initial state.
+	if h.getState != nil {
+		if state := h.getState(); state != nil {
+			initMsg := WSMessage{
+				Type:         "latest_price",
+				TS:           state.TS.Format(time.RFC3339Nano),
+				Price:        state.Price.String(),
+				Basis:        state.Basis,
+				IsStale:      state.IsStale,
+				QualityScore: state.QualityScore.String(),
+				SourceCount:  state.SourceCount,
+				SourcesUsed:  state.SourcesUsed,
+				Message:      "initial_state",
+			}
+			if data, err := json.Marshal(initMsg); err == nil {
+				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				conn.WriteMessage(websocket.TextMessage, data)
+			}
+		} else {
+			noData := WSMessage{
+				Type:    "latest_price",
+				TS:      time.Now().UTC().Format(time.RFC3339Nano),
+				Message: "no_data_yet",
+			}
+			if data, err := json.Marshal(noData); err == nil {
+				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				conn.WriteMessage(websocket.TextMessage, data)
+			}
+		}
+	}
 
 	// Writer goroutine
 	go func() {
@@ -91,7 +214,7 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 			})
 		}()
 
-		pingTicker := time.NewTicker(30 * time.Second)
+		pingTicker := time.NewTicker(h.wsCfg.PingInterval())
 		defer pingTicker.Stop()
 
 		for {
@@ -114,7 +237,7 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Reader goroutine (drain incoming messages)
+	// Reader goroutine — parses subscribe/unsubscribe actions
 	go func() {
 		defer func() {
 			client.closeOnce.Do(func() {
@@ -126,23 +249,44 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		conn.SetReadLimit(4096)
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(h.wsCfg.ReadDeadline()))
 		conn.SetPongHandler(func(string) error {
-			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			conn.SetReadDeadline(time.Now().Add(h.wsCfg.ReadDeadline()))
 			return nil
 		})
 
 		for {
-			_, _, err := conn.ReadMessage()
+			_, rawMsg, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
+			var action clientAction
+			if json.Unmarshal(rawMsg, &action) != nil {
+				continue // silently ignore unparseable messages
+			}
+			switch action.Action {
+			case "subscribe":
+				for _, t := range action.Types {
+					client.subs.set(t, true)
+				}
+			case "unsubscribe":
+				for _, t := range action.Types {
+					client.subs.set(t, false)
+				}
+			}
+			// unknown actions silently ignored (forward-compatible)
 		}
 	}()
 }
 
 func (h *WSHub) Broadcast(msg WSMessage) {
-	data, err := json.Marshal(msg)
+	msg.Seq = h.seq.Add(1)
+
+	marshalFn := json.Marshal
+	if h.marshal != nil {
+		marshalFn = h.marshal
+	}
+	data, err := marshalFn(msg)
 	if err != nil {
 		h.logger.Error("marshal ws message failed", "error", err)
 		return
@@ -152,10 +296,19 @@ func (h *WSHub) Broadcast(msg WSMessage) {
 	defer h.mu.RUnlock()
 
 	for c := range h.clients {
+		if !c.subs.wants(msg.Type) {
+			continue
+		}
 		select {
 		case c.sendCh <- data:
 		default:
-			// Client too slow, skip
+			drops := c.dropCount.Add(1)
+			if drops%100 == 1 {
+				c.logger.Warn("ws client too slow, dropping message",
+					"type", msg.Type,
+					"total_drops", drops,
+				)
+			}
 		}
 	}
 }
