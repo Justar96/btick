@@ -155,6 +155,7 @@ func (db *DB) QueryLatestSnapshot(ctx context.Context) (*domain.Snapshot1s, erro
 		is_stale, is_degraded, quality_score, source_count,
 		sources_used, source_details_json, last_event_exchange_ts, finalized_at
 	FROM snapshots_1s
+	WHERE ts_second > now() - INTERVAL '7 days'
 	ORDER BY ts_second DESC
 	LIMIT 1`
 
@@ -179,6 +180,7 @@ func (db *DB) QueryCanonicalTicks(ctx context.Context, limit int) ([]domain.Cano
 		is_stale, is_degraded, quality_score, source_count,
 		sources_used, source_details_json
 	FROM canonical_ticks
+	WHERE ts_event > now() - INTERVAL '2 days'
 	ORDER BY ts_event DESC
 	LIMIT $1`
 

@@ -65,14 +65,32 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'idx_raw_ticks_source_trade already exists or cannot be created: %', SQLERRM;
 END $$;
 
-DO $$ BEGIN
+DO $$
+DECLARE
+    chunk_rec RECORD;
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM timescaledb_information.compression_settings
+        WHERE hypertable_name = 'raw_ticks'
+          AND attname = 'symbol_canonical'
+          AND segmentby_column_index IS NOT NULL
+    ) THEN
+        FOR chunk_rec IN
+            SELECT format('%I.%I', chunk_schema, chunk_name)::regclass AS chunk
+            FROM timescaledb_information.chunks
+            WHERE hypertable_name = 'raw_ticks' AND is_compressed
+        LOOP
+            PERFORM decompress_chunk(chunk_rec.chunk);
+        END LOOP;
+    END IF;
+
     ALTER TABLE raw_ticks SET (
         timescaledb.compress,
-        timescaledb.compress_segmentby = 'source, symbol_canonical',
+        timescaledb.compress_segmentby = 'source',
         timescaledb.compress_orderby = 'exchange_ts DESC',
         timescaledb.compress_bloomfilter = 'trade_id');
 EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'raw_ticks compression already configured or bloom filter unsupported: %', SQLERRM;
+    RAISE NOTICE 'raw_ticks compression config: %', SQLERRM;
 END $$;
 SELECT add_compression_policy('raw_ticks', INTERVAL '2 hours', if_not_exists => TRUE);
 SELECT add_retention_policy('raw_ticks', INTERVAL '1 day', if_not_exists => TRUE);
@@ -125,13 +143,31 @@ SELECT create_hypertable('snapshots_1s', 'ts_second',
     chunk_time_interval => INTERVAL '1 day',
     if_not_exists => TRUE);
 
-DO $$ BEGIN
+DO $$
+DECLARE
+    chunk_rec RECORD;
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM timescaledb_information.compression_settings
+        WHERE hypertable_name = 'snapshots_1s'
+          AND attname = 'canonical_symbol'
+          AND segmentby_column_index IS NOT NULL
+    ) THEN
+        FOR chunk_rec IN
+            SELECT format('%I.%I', chunk_schema, chunk_name)::regclass AS chunk
+            FROM timescaledb_information.chunks
+            WHERE hypertable_name = 'snapshots_1s' AND is_compressed
+        LOOP
+            PERFORM decompress_chunk(chunk_rec.chunk);
+        END LOOP;
+    END IF;
+
     ALTER TABLE snapshots_1s SET (
         timescaledb.compress,
-        timescaledb.compress_segmentby = 'canonical_symbol',
+        timescaledb.compress_segmentby = '',
         timescaledb.compress_orderby = 'ts_second DESC');
 EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'snapshots_1s compression already configured: %', SQLERRM;
+    RAISE NOTICE 'snapshots_1s compression config: %', SQLERRM;
 END $$;
 SELECT add_compression_policy('snapshots_1s', INTERVAL '1 day', if_not_exists => TRUE);
 SELECT add_retention_policy('snapshots_1s', INTERVAL '365 days', if_not_exists => TRUE);
@@ -153,7 +189,7 @@ CREATE TABLE IF NOT EXISTS feed_health (
 
 -- Continuous aggregate: 1-minute OHLCV candles per source
 CREATE MATERIALIZED VIEW IF NOT EXISTS ohlcv_1m
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.compress = true) AS
 SELECT
     time_bucket('1 minute', exchange_ts) AS bucket,
     source,
@@ -186,7 +222,7 @@ SELECT add_retention_policy('ohlcv_1m', INTERVAL '30 days', if_not_exists => TRU
 
 -- Hourly rollups of 1-second snapshots
 CREATE MATERIALIZED VIEW IF NOT EXISTS snapshot_rollups_1h
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.compress = true) AS
 SELECT
     time_bucket('1 hour', ts_second) AS bucket,
     canonical_symbol,
@@ -219,7 +255,7 @@ SELECT add_retention_policy('snapshot_rollups_1h', INTERVAL '365 days', if_not_e
 
 -- Daily rollups of hourly snapshot aggregates
 CREATE MATERIALIZED VIEW IF NOT EXISTS snapshot_rollups_1d
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.compress = true) AS
 SELECT
     time_bucket('1 day', bucket) AS bucket,
     canonical_symbol,

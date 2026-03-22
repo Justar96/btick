@@ -243,7 +243,7 @@ Replace in-process channel fan-out with PostgreSQL logical replication or CDC (e
 ```sql
 ALTER TABLE raw_ticks SET (
     timescaledb.compress,
-    timescaledb.compress_segmentby = 'source, symbol_canonical',
+    timescaledb.compress_segmentby = 'source',
     timescaledb.compress_orderby = 'exchange_ts DESC',
     timescaledb.compress_bloomfilter = 'trade_id'
 );
@@ -364,7 +364,7 @@ Indexes are **not used** on compressed chunks. TimescaleDB uses:
 2. **Segment filtering** — `compress_segmentby` columns filter segments within a chunk.
 3. **Orderby optimization** — `compress_orderby` enables efficient range scans.
 
-**Implication**: Indexes on `raw_ticks` only help during the 2-hour uncompressed window. After compression, `segmentby = 'source, symbol_canonical'` and `orderby = 'exchange_ts DESC'` govern query performance.
+**Implication**: Indexes on `raw_ticks` only help during the 2-hour uncompressed window. After compression, `segmentby = 'source'` and `orderby = 'exchange_ts DESC'` govern query performance.
 
 #### B. Recommended index changes
 
@@ -643,8 +643,8 @@ go test -bench=BenchmarkPipeline -benchmem -timeout 60s ./internal/engine/...
 
 | Table | Segment By | Order By | Bloom Filter |
 |-------|------------|----------|--------------|
-| raw_ticks | source, symbol_canonical | exchange_ts DESC | trade_id |
-| snapshots_1s | canonical_symbol | ts_second DESC | None |
+| raw_ticks | source | exchange_ts DESC | trade_id |
+| snapshots_1s | _(none)_ | ts_second DESC | None |
 
 ### Continuous Aggregates
 
@@ -668,10 +668,10 @@ go test -bench=BenchmarkPipeline -benchmem -timeout 60s ./internal/engine/...
 ### TimescaleDB 2.24.0 Features Used
 
 - [ ] Lightning-fast recompression — automatic after upgrade; test late-arriving inserts
-- [x] Direct Compress with continuous aggregates — `ohlcv_1m`, `snapshot_rollups_1h`, and `snapshot_rollups_1d` use compressed materialized views
+- [x] Direct Compress with continuous aggregates — `ohlcv_1m`, `snapshot_rollups_1h`, and `snapshot_rollups_1d` use `timescaledb.compress = true` in WITH clause
 - [ ] UUIDv7 in continuous aggregates — not needed (no UUID columns in aggregates)
 - [x] Bloom filter sparse indexes — enabled for `raw_ticks.trade_id` (available in TimescaleDB 2.20+)
 
 **TimescaleDB Version:** 2.24.0+ required
-**Verified At:** 2026-03-21
+**Verified At:** 2026-03-22
 <!-- TIMESCALEDB_IMPLEMENTATION:END -->
