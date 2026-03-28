@@ -1,6 +1,6 @@
 # btick
 
-Manipulation-resistant BTC/USD price from Binance, Coinbase, and Kraken. Built for prediction market settlement.
+Manipulation-resistant BTC/USD price from Binance, Coinbase, Kraken, and OKX. Built for prediction market settlement.
 
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791?style=flat&logo=postgresql)](https://www.postgresql.org/)
@@ -41,8 +41,9 @@ Full reference, examples, and OpenAPI spec in [docs/API.md](docs/API.md) and [do
 
 ```
 Binance ──┐
-Coinbase ─┼→ Normalizer → SnapshotEngine (1s median) → REST + WebSocket
-Kraken ───┘                      ↓
+Coinbase ─┼┐
+Kraken ───┼┼→ Normalizer → SnapshotEngine (1s median) → REST + WebSocket
+OKX ──────┘┘                      ↓
                              PostgreSQL
 ```
 

@@ -115,7 +115,6 @@ type SourceConfig struct {
 	NativeSymbol          string `yaml:"native_symbol"`
 	UseBookTickerFallback bool   `yaml:"use_book_ticker_fallback"`
 	UseTickerFallback     bool   `yaml:"use_ticker_fallback"`
-	JWT                   string `yaml:"jwt"`
 	PingIntervalSec       int    `yaml:"ping_interval_sec"`
 	MaxConnLifetimeSec    int    `yaml:"max_conn_lifetime_sec"`
 }
@@ -135,13 +134,21 @@ func (s SourceConfig) MaxConnLifetime() time.Duration {
 }
 
 type PricingConfig struct {
-	Mode                   string  `yaml:"mode"`
-	MinimumHealthySources  int     `yaml:"minimum_healthy_sources"`
-	TradeFreshnessWindowMs int     `yaml:"trade_freshness_window_ms"`
-	QuoteFreshnessWindowMs int     `yaml:"quote_freshness_window_ms"`
-	LateArrivalGraceMs     int     `yaml:"late_arrival_grace_ms"`
-	OutlierRejectPct       float64 `yaml:"outlier_reject_pct"`
-	CarryForwardMaxSeconds int     `yaml:"carry_forward_max_seconds"`
+	Mode                          string  `yaml:"mode"`
+	MinimumHealthySources         int     `yaml:"minimum_healthy_sources"`
+	TradeFreshnessWindowMs        int     `yaml:"trade_freshness_window_ms"`
+	QuoteFreshnessWindowMs        int     `yaml:"quote_freshness_window_ms"`
+	LateArrivalGraceMs            int     `yaml:"late_arrival_grace_ms"`
+	OutlierRejectPct              float64 `yaml:"outlier_reject_pct"`
+	CarryForwardMaxSeconds        int     `yaml:"carry_forward_max_seconds"`
+	SettlementReaggregationWindowMs int   `yaml:"settlement_reaggregation_window_ms"`
+}
+
+func (p PricingConfig) SettlementReaggregationWindow() time.Duration {
+	if p.SettlementReaggregationWindowMs <= 0 {
+		return 5 * time.Second // default 5s
+	}
+	return time.Duration(p.SettlementReaggregationWindowMs) * time.Millisecond
 }
 
 func (p PricingConfig) TradeFreshnessWindow() time.Duration {

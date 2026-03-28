@@ -40,7 +40,7 @@ func New(inCh <-chan domain.RawEvent, outCh chan<- domain.RawEvent, logger *slog
 		logger:  logger.With("component", "normalizer"),
 		maxSeen: defaultMaxSeen,
 	}
-	for _, source := range [...]string{"binance", "coinbase", "kraken"} {
+	for _, source := range [...]string{"binance", "coinbase", "kraken", "okx"} {
 		n.shards.Store(source, newDedupShard(n.maxSeen))
 	}
 	return n
@@ -154,6 +154,9 @@ func mapCanonicalSymbol(source, native string) string {
 		return "BTC/USD"
 	case "kraken":
 		// BTC/USD -> BTC/USD
+		return "BTC/USD"
+	case "okx":
+		// BTC-USDT -> BTC/USD (treating USDT ≈ USD for canonical purposes)
 		return "BTC/USD"
 	default:
 		return "BTC/USD"

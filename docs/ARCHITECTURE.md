@@ -9,12 +9,12 @@ btick is a real-time Bitcoin price oracle service designed for prediction market
 │                           BTC PRICE TICK SERVICE                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                         │
-│  │   Binance   │  │  Coinbase   │  │   Kraken    │     Exchange Adapters   │
-│  │   Adapter   │  │   Adapter   │  │   Adapter   │                         │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                         │
-│         │                │                │                                 │
-│         └────────────────┼────────────────┘                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
+│  │   Binance   │  │  Coinbase   │  │   Kraken    │  │    OKX      │        │
+│  │   Adapter   │  │   Adapter   │  │   Adapter   │  │   Adapter   │        │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘        │
+│         │                │                │                │                 │
+│         └────────────────┼────────────────┼────────────────┘                 │
 │                          │ rawCh (10k)                                      │
 │                          ▼                                                  │
 │                 ┌─────────────────┐                                         │
@@ -87,8 +87,9 @@ Each adapter maintains a persistent WebSocket connection to an exchange and norm
 | Adapter | Exchange | Streams | Auth Required |
 |---------|----------|---------|---------------|
 | `BinanceAdapter` | Binance | `btcusdt@trade`, `btcusdt@bookTicker` | No |
-| `CoinbaseAdapter` | Coinbase Advanced | `market_trades`, `ticker` | Optional JWT (higher rate limits) |
+| `CoinbaseAdapter` | Coinbase Exchange | `matches`, `ticker`, `heartbeat` | No (public `ws-feed`) |
 | `KrakenAdapter` | Kraken | `trade`, `ticker` | No |
+| `OKXAdapter` | OKX | `trades`, `tickers` | No |
 
 **Location:** `internal/adapter/`
 
@@ -161,7 +162,7 @@ Efficiently writes raw events to the database.
 
 **Features:**
 - Batches inserts (up to 2000 rows or 100ms, configurable)
-- Uses pgx `SendBatch` for pipelined inserts with `ON CONFLICT DO NOTHING`
+- Uses a temp staging table plus `CopyFrom` and `INSERT ... ON CONFLICT DO NOTHING`
 - Falls back to individual inserts on batch failure
 - Non-blocking operation
 
@@ -224,11 +225,11 @@ RawEvent ──► SnapshotEngine.updateVenueState()
                    │         │
                    │         └──► tickCh ──► API broadcastLoop ──► WSHub broadcast
                    │
-                   └──► finalizeSnapshot() (every 1s, after watermark delay)
-                              │
-                              ├──► snapshots_1s table (direct insert)
-                              │
-                              └──► snapshotCh ──► API broadcastLoop ──► WSHub broadcast
+                    └──► finalizeSnapshot() (every 1s, after watermark delay)
+                               │
+                               ├──► snapshotsToWrite ch ──► runSnapshotWriter ──► snapshots_1s (batched)
+                               │
+                               └──► snapshotCh ──► API broadcastLoop ──► WSHub broadcast
 ```
 
 ### Settlement Query Path
@@ -260,17 +261,17 @@ Market Service ──► GET /v1/price/settlement?ts=...
          │
          │ spawns via safeGo
          ▼
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│ Binance Adapter │  │Coinbase Adapter │  │ Kraken Adapter  │
-│   goroutine     │  │   goroutine     │  │   goroutine     │
-│                 │  │                 │  │                 │
-│ - WS read loop  │  │ - WS read loop  │  │ - WS read loop  │
-│ - Ping loop     │  │ - Ping loop     │  │ - Ping loop     │
-│ - Reconnect     │  │ - Reconnect     │  │ - Reconnect     │
-│ - Conn closer   │  │ - Conn closer   │  │ - Conn closer   │
-└────────┬────────┘  └────────┬────────┘  └────────┬────────┘
-         │                    │                    │
-         └────────────────────┼────────────────────┘
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│ Binance Adapter │  │Coinbase Adapter │  │ Kraken Adapter  │  │   OKX Adapter   │
+│   goroutine     │  │   goroutine     │  │   goroutine     │  │   goroutine     │
+│                 │  │                 │  │                 │  │                 │
+│ - WS read loop  │  │ - WS read loop  │  │ - WS read loop  │  │ - WS read loop  │
+│ - Ping loop     │  │ - Ping loop     │  │ - Ping loop     │  │ - Ping loop     │
+│ - Reconnect     │  │ - Reconnect     │  │ - Reconnect     │  │ - Reconnect     │
+│ - Conn closer   │  │ - Conn closer   │  │ - Conn closer   │  │ - Conn closer   │
+└────────┬────────┘  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘
+         │                    │                    │                    │
+         └────────────────────┼────────────────────┼────────────────────┘
                               │
                               ▼
                     rawCh (10k buffered)
@@ -295,12 +296,14 @@ Market Service ──► GET /v1/price/settlement?ts=...
 │   goroutine     │  │   goroutine     │  │   goroutines    │
 │                 │  │                 │  │                 │
 │ - Batch timer   │  │ - Event loop    │  │ - HTTP handler  │
-│ - pgx SendBatch │  │ - 1s ticker     │  │ - WS hub run    │
+│ - CopyFrom      │  │ - 1s ticker     │  │ - WS hub run    │
 │ - Fallback INS  │  │ - Watermark     │  │   (heartbeat)   │
 └─────────────────┘  │ - Tick writer   │  │ - Broadcast loop│
                      │   (batched)     │  │ - Per-client:   │
-                     └─────────────────┘  │   writer + reader│
-                                          └─────────────────┘
+                     │ - Snapshot      │  │   writer + reader│
+                     │   writer        │  └─────────────────┘
+                     │   (batched)     │
+                     └─────────────────┘
 
          ┌─────────────────┐  ┌─────────────────┐
          │ Retention Pruner│  │ Feed Health     │  Background goroutines

@@ -228,7 +228,7 @@ func main() {
 	}
 
 	// API server
-	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, apiDB, eng, logger)
+	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, cfg.Pricing, apiDB, eng, logger)
 	safeGo(&wg, cancel, logger, "api-server", func() {
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("API server error", "error", err)
@@ -262,7 +262,6 @@ func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- dom
 		a := adapter.NewCoinbaseAdapter(
 			src.WSURL,
 			src.NativeSymbol,
-			src.JWT,
 			src.PingInterval(),
 			outCh,
 			logger,
@@ -274,6 +273,16 @@ func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- dom
 			src.WSURL,
 			src.NativeSymbol,
 			src.UseTickerFallback,
+			src.PingInterval(),
+			outCh,
+			logger,
+		)
+		a.Run(ctx)
+
+	case "okx":
+		a := adapter.NewOKXAdapter(
+			src.WSURL,
+			src.NativeSymbol,
 			src.PingInterval(),
 			outCh,
 			logger,

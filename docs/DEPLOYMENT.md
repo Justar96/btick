@@ -16,8 +16,9 @@ btick can be deployed in multiple environments:
 - PostgreSQL 17+ with TimescaleDB 2.24+ (or Railway Postgres with TimescaleDB)
 - Outbound WebSocket access to:
   - `wss://stream.binance.com:9443`
-  - `wss://advanced-trade-ws.coinbase.com`
+  - `wss://ws-feed.exchange.coinbase.com`
   - `wss://ws.kraken.com`
+  - `wss://ws.okx.com:8443`
 
 ---
 
@@ -244,7 +245,7 @@ data:
         ping_interval_sec: 15
       - name: coinbase
         enabled: true
-        ws_url: "wss://advanced-trade-ws.coinbase.com"
+        ws_url: "wss://ws-feed.exchange.coinbase.com"
         native_symbol: BTC-USD
         ping_interval_sec: 25
       - name: kraken
@@ -252,6 +253,11 @@ data:
         ws_url: "wss://ws.kraken.com/v2"
         native_symbol: BTC/USD
         ping_interval_sec: 30
+      - name: okx
+        enabled: true
+        ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+        native_symbol: BTC-USDT
+        ping_interval_sec: 20
     pricing:
       mode: multi_venue_median
       minimum_healthy_sources: 2
@@ -390,10 +396,8 @@ sources:
 
   - name: coinbase
     enabled: true
-    ws_url: "wss://advanced-trade-ws.coinbase.com"
+    ws_url: "wss://ws-feed.exchange.coinbase.com"
     native_symbol: BTC-USD
-    use_book_ticker_fallback: true
-    jwt: ""                   # Optional for higher rate limits
     ping_interval_sec: 25
     max_conn_lifetime_sec: 0  # 0 = no limit
 
@@ -403,6 +407,13 @@ sources:
     native_symbol: BTC/USD
     use_ticker_fallback: true
     ping_interval_sec: 30
+    max_conn_lifetime_sec: 0  # 0 = no limit
+
+  - name: okx
+    enabled: true
+    ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+    native_symbol: BTC-USDT
+    ping_interval_sec: 20
     max_conn_lifetime_sec: 0  # 0 = no limit
 
 pricing:
@@ -440,7 +451,7 @@ health:
 
 ### Post-Deployment
 
-- [ ] Verify all 3 sources connect: `GET /v1/health/feeds`
+- [ ] Verify all 4 sources connect: `GET /v1/health/feeds`
 - [ ] Verify prices streaming: `GET /v1/price/latest`
 - [ ] Test WebSocket: `websocat wss://your-domain/ws/price` — verify welcome, initial state, heartbeats
 - [ ] Set up monitoring/alerting

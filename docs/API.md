@@ -7,7 +7,7 @@
 
 ## Overview
 
-btick is a real-time Bitcoin price oracle service that aggregates prices from multiple exchanges (Binance, Coinbase, Kraken) and produces a canonical price using multi-venue median pricing. This service is designed for prediction market settlement and real-time price feeds.
+btick is a real-time Bitcoin price oracle service that aggregates prices from multiple exchanges (Binance, Coinbase, Kraken, and OKX) and produces a canonical price using multi-venue median pricing. This service is designed for prediction market settlement and real-time price feeds.
 
 ### Key Features
 
@@ -111,6 +111,13 @@ Per-source feed health status. Requires database.
     "last_message_ts": "2026-03-19T09:09:59.950Z",
     "stale": false,
     "updated_at": "2026-03-19T09:10:00.123456789Z"
+  },
+  {
+    "source": "okx",
+    "conn_state": "connected",
+    "last_message_ts": "2026-03-19T09:10:00.091Z",
+    "stale": false,
+    "updated_at": "2026-03-19T09:10:00.123456789Z"
   }
 ]
 ```
@@ -136,8 +143,8 @@ Get the current canonical BTC/USD price (from memory, lowest latency).
   "is_stale": false,
   "is_degraded": false,
   "quality_score": 0.9556,
-  "source_count": 3,
-  "sources_used": ["binance", "coinbase", "kraken"]
+  "source_count": 4,
+  "sources_used": ["binance", "coinbase", "kraken", "okx"]
 }
 ```
 
@@ -197,8 +204,8 @@ GET /v1/price/settlement?ts=2026-03-19T09:10:00Z
   "status": "confirmed",
   "basis": "median_trade",
   "quality_score": 0.9556,
-  "source_count": 3,
-  "sources_used": ["binance", "coinbase", "kraken"],
+  "source_count": 4,
+  "sources_used": ["binance", "coinbase", "kraken", "okx"],
   "finalized_at": "2026-03-19T09:10:01.251996789Z",
   "source_details": "eyJiaW5hbmNlIjp7InByaWNlIjoiNzAxMDUuNDUiLCJ0cyI6IjIwMjYtMDMtMTlUMDk6MDk6NTkuOTk5WiJ9fQ=="
 }
@@ -297,8 +304,8 @@ GET /v1/price/snapshots?start=2026-03-19T09:00:00Z&end=2026-03-19T09:05:00Z
     "is_stale": false,
     "is_degraded": false,
     "quality_score": 0.95,
-    "source_count": 3,
-    "sources_used": ["binance", "coinbase", "kraken"],
+    "source_count": 4,
+    "sources_used": ["binance", "coinbase", "kraken", "okx"],
     "finalized_at": "2026-03-19T09:00:01.250Z"
   },
   {
@@ -307,8 +314,8 @@ GET /v1/price/snapshots?start=2026-03-19T09:00:00Z&end=2026-03-19T09:05:00Z
     "price": "70101.50",
     "basis": "median_trade",
     "quality_score": 0.94,
-    "source_count": 3,
-    "sources_used": ["binance", "coinbase", "kraken"],
+    "source_count": 4,
+    "sources_used": ["binance", "coinbase", "kraken", "okx"],
     "finalized_at": "2026-03-19T09:00:02.250Z"
   }
 ]
@@ -340,8 +347,8 @@ Query recent canonical price change events.
     "is_stale": false,
     "is_degraded": false,
     "quality_score": 0.9556,
-    "source_count": 3,
-    "sources_used": ["binance", "coinbase", "kraken"]
+    "source_count": 4,
+    "sources_used": ["binance", "coinbase", "kraken", "okx"]
   }
 ]
 ```
@@ -356,7 +363,7 @@ Query raw tick data from individual exchanges (for debugging/auditing).
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `source` | string | No | Filter by source (binance, coinbase, kraken) |
+| `source` | string | No | Filter by source (binance, coinbase, kraken, okx) |
 | `start` | string | No | Start time (RFC3339) |
 | `end` | string | No | End time (RFC3339) |
 | `limit` | int | No | Number of events (default: 100) |
@@ -419,8 +426,8 @@ On connect, the server sends two messages before any live broadcast data:
   "price": "70105.45",
   "basis": "median_trade",
   "quality_score": "0.9556",
-  "source_count": 3,
-  "sources_used": ["binance", "coinbase", "kraken"],
+  "source_count": 4,
+  "sources_used": ["binance", "coinbase", "kraken", "okx"],
   "message": "initial_state"
 }
 ```
@@ -456,8 +463,8 @@ Sent on every trade that changes the canonical price (sub-second).
   "price": "70105.45",
   "basis": "median_trade",
   "quality_score": "0.9556",
-  "source_count": 3,
-  "sources_used": ["binance", "coinbase", "kraken"],
+  "source_count": 4,
+  "sources_used": ["binance", "coinbase", "kraken", "okx"],
   "is_stale": false
 }
 ```
@@ -474,8 +481,8 @@ Sent every second with the finalized price for that second.
   "price": "70105.45",
   "basis": "median_trade",
   "quality_score": "0.9556",
-  "source_count": 3,
-  "sources_used": ["binance", "coinbase", "kraken"],
+  "source_count": 4,
+  "sources_used": ["binance", "coinbase", "kraken", "okx"],
   "is_stale": false
 }
 ```
@@ -779,6 +786,11 @@ Common HTTP status codes:
 ---
 
 ## Changelog
+
+### v1.2 (2026-03-24)
+- Provider updates: Coinbase now uses the public Exchange `ws-feed` (no JWT required)
+- Provider updates: OKX added as a fourth market data source
+- Storage: Timescale migration made compatible with the Railway TimescaleDB build in use
 
 ### v1.1 (2026-03-21)
 - WebSocket: welcome message + initial state on connect (no more ~1s wait)

@@ -177,6 +177,7 @@ func TestNormalizer_MapsCanonicalSymbol(t *testing.T) {
 		{"binance", "BTCUSDT", "BTC/USD"},
 		{"coinbase", "BTC-USD", "BTC/USD"},
 		{"kraken", "BTC/USD", "BTC/USD"},
+		{"okx", "BTC-USDT", "BTC/USD"},
 		{"unknown", "XYZ", "BTC/USD"},
 	}
 
@@ -414,6 +415,7 @@ func TestMapCanonicalSymbol(t *testing.T) {
 		{"binance", "btcusdt", "BTC/USD"},
 		{"coinbase", "BTC-USD", "BTC/USD"},
 		{"kraken", "BTC/USD", "BTC/USD"},
+		{"okx", "BTC-USDT", "BTC/USD"},
 		{"unknown", "ANYTHING", "BTC/USD"},
 	}
 

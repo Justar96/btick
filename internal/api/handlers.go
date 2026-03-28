@@ -1,10 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
+
+	"github.com/justar9/btick/internal/domain"
+	"github.com/shopspring/decimal"
 )
 
 func (s *Server) handleLatest(w http.ResponseWriter, r *http.Request) {
@@ -264,28 +269,16 @@ func (s *Server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check quality - warn if degraded or stale
-	status := "confirmed"
-	if snapshot.IsStale {
-		status = "stale"
-	} else if snapshot.IsDegraded {
-		status = "degraded"
+	// If snapshot is confirmed, return it directly (fast path).
+	if !snapshot.IsStale && !snapshot.IsDegraded {
+		s.writeJSON(w, s.buildSettlementResp(ts, snapshot, "confirmed"))
+		return
 	}
 
-	resp := map[string]interface{}{
-		"settlement_ts":  ts.Format(time.RFC3339),
-		"symbol":         snapshot.CanonicalSymbol,
-		"price":          snapshot.CanonicalPrice.String(),
-		"status":         status,
-		"basis":          snapshot.Basis,
-		"quality_score":  snapshot.QualityScore.InexactFloat64(),
-		"source_count":   snapshot.SourceCount,
-		"sources_used":   snapshot.SourcesUsed,
-		"finalized_at":   snapshot.FinalizedAt.Format(time.RFC3339Nano),
-		"source_details": snapshot.SourceDetailsJSON,
-	}
-
-	s.writeJSON(w, resp)
+	// Snapshot is degraded or stale — try re-aggregation from raw trades
+	// using a wider window than the real-time snapshot engine.
+	reagg := s.tryReaggregate(r.Context(), ts, snapshot)
+	s.writeJSON(w, reagg)
 }
 
 func (s *Server) handleFeedHealth(w http.ResponseWriter, r *http.Request) {
@@ -333,4 +326,131 @@ func (s *Server) writeJSON(w http.ResponseWriter, v interface{}) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		s.logger.Error("encode response", "err", err)
 	}
+}
+
+// buildSettlementResp constructs the JSON response map for a settlement query.
+func (s *Server) buildSettlementResp(ts time.Time, snap *domain.Snapshot1s, status string) map[string]interface{} {
+	return map[string]interface{}{
+		"settlement_ts":  ts.Format(time.RFC3339),
+		"symbol":         snap.CanonicalSymbol,
+		"price":          snap.CanonicalPrice.String(),
+		"status":         status,
+		"basis":          snap.Basis,
+		"quality_score":  snap.QualityScore.InexactFloat64(),
+		"source_count":   snap.SourceCount,
+		"sources_used":   snap.SourcesUsed,
+		"finalized_at":   snap.FinalizedAt.Format(time.RFC3339Nano),
+		"source_details": snap.SourceDetailsJSON,
+	}
+}
+
+// tryReaggregate attempts to build a better settlement price from raw trades
+// when the pre-computed snapshot is degraded or stale. Falls back to the
+// original snapshot if re-aggregation doesn't improve source coverage.
+func (s *Server) tryReaggregate(ctx context.Context, ts time.Time, original *domain.Snapshot1s) map[string]interface{} {
+	trades, err := s.db.QueryClosestTradePerSource(ctx, ts, s.settlementWindow)
+	if err != nil || len(trades) == 0 {
+		// Re-aggregation failed or no trades found — return original snapshot
+		status := "stale"
+		if !original.IsStale && original.IsDegraded {
+			status = "degraded"
+		}
+		return s.buildSettlementResp(ts, original, status)
+	}
+
+	// If re-aggregation didn't find more sources than the original, keep original
+	if len(trades) <= original.SourceCount {
+		status := "degraded"
+		if original.IsStale {
+			status = "stale"
+		}
+		return s.buildSettlementResp(ts, original, status)
+	}
+
+	// Re-aggregation found more sources — compute median price
+	prices := make([]decimal.Decimal, len(trades))
+	sources := make([]string, len(trades))
+	var latestTS time.Time
+	for i, t := range trades {
+		prices[i] = t.RefPrice
+		sources[i] = t.Source
+		if t.EventTS.After(latestTS) {
+			latestTS = t.EventTS
+		}
+	}
+	sort.Strings(sources)
+
+	median := computeMedian(prices)
+	isDegraded := len(trades) < s.minHealthySources
+
+	status := "confirmed"
+	if isDegraded {
+		status = "degraded"
+	}
+
+	// Build source details for the re-aggregated result
+	details := make([]domain.VenueRefPrice, len(trades))
+	copy(details, trades)
+	detailsJSON, err2 := json.Marshal(details)
+	if err2 != nil {
+		detailsJSON = []byte("{}")
+	}
+
+	// Quality score: source_score (50%) + age_penalty (30%) + basis (20%)
+	sourceScore := float64(len(trades)) / 3.0
+	if sourceScore > 1.0 {
+		sourceScore = 1.0
+	}
+	var avgAge float64
+	for _, t := range trades {
+		age := t.AgeMs
+		if age < 0 {
+			age = -age
+		}
+		avgAge += float64(age)
+	}
+	avgAge /= float64(len(trades))
+	agePenalty := 1.0 - avgAge/5000.0
+	if agePenalty < 0 {
+		agePenalty = 0
+	}
+	quality := sourceScore*0.5 + agePenalty*0.3 + 0.2 // no midpoint penalty
+
+	basis := "median_trade"
+	if len(trades) == 1 {
+		basis = "single_trade"
+	}
+
+	s.logger.Info("settlement re-aggregated from raw trades",
+		"ts", ts, "original_sources", original.SourceCount,
+		"reagg_sources", len(trades), "sources", sources,
+	)
+
+	return map[string]interface{}{
+		"settlement_ts":  ts.Format(time.RFC3339),
+		"symbol":         original.CanonicalSymbol,
+		"price":          median.String(),
+		"status":         status,
+		"basis":          basis,
+		"quality_score":  quality,
+		"source_count":   len(trades),
+		"sources_used":   sources,
+		"finalized_at":   original.FinalizedAt.Format(time.RFC3339Nano),
+		"source_details": detailsJSON,
+	}
+}
+
+// computeMedian returns the median of a decimal slice. Returns zero for empty input.
+func computeMedian(prices []decimal.Decimal) decimal.Decimal {
+	if len(prices) == 0 {
+		return decimal.Zero
+	}
+	sorted := make([]decimal.Decimal, len(prices))
+	copy(sorted, prices)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].LessThan(sorted[j]) })
+	n := len(sorted)
+	if n%2 == 1 {
+		return sorted[n/2]
+	}
+	return sorted[n/2-1].Add(sorted[n/2]).Div(decimal.NewFromInt(2))
 }

@@ -8,9 +8,9 @@ See CLAUDE.md for the full pipeline diagram. Key throughput characteristics:
 
 | Component | Throughput | Notes |
 |-----------|-----------|-------|
-| Adapters (3 venues) | ~30-100 msg/s combined | Binance highest volume; trades + book tickers |
+| Adapters (4 venues) | ~30-100 msg/s combined | Binance highest volume; trades + tickers |
 | Normalizer | ~30-100 evt/s in, same out | Dedup ring buffer (100k entries), UUID v7 assignment |
-| Writer | 2000-row batches / 100ms flush | `pgx.Batch` with `INSERT ... ON CONFLICT DO NOTHING` |
+| Writer | 2000-row batches / 100ms flush | Temp staging table + `CopyFrom` + merge with `ON CONFLICT DO NOTHING` |
 | SnapshotEngine | 1 snapshot/s + irregular ticks | 250ms watermark delay, 10-concurrent finalization cap |
 | WebSocket Hub | 1-2 broadcast/s per client | Per-type subscription filtering, 256-slot send buffer |
 
@@ -35,7 +35,7 @@ These are already implemented in the current codebase:
 - **Connection context cancellation**: blocked reads terminate promptly on shutdown (`runAdapter` in `base.go`).
 - **Canonical tick batching**: snapshot engine batches ticks (128 rows / 100ms) before DB write (`flushTickBatch` in `snapshot.go`).
 - **Pipeline latency histogram**: minute-window `recv_ts - exchange_ts` histogram logged periodically (`logLatencyStats` in `snapshot.go`).
-- **Raw writer simplification**: staging-table DDL removed; pgx `SendBatch` with statement caching (`flushBatch` in `writer.go`).
+- **Raw tick COPY staging path**: the writer uses a temp staging table plus `CopyFrom`/merge into `raw_ticks`, keeping `ON CONFLICT DO NOTHING` semantics while reducing row-by-row insert overhead (`writer.go`).
 - **Writer batch slice reuse**: raw writer reuses `[]RawEvent` buffers via `sync.Pool` and clears entries before reuse (`writer.go`).
 - **Snapshot DB batching**: finalized snapshots are queued for 10-row / 10s batched persistence without delaying WS broadcast (`snapshot.go`, `persistence.go`, `queries.go`).
 - **Snapshot writer shutdown draining**: snapshot/tick DB writers now drain after in-flight finalizers complete so batched writes are not lost on shutdown (`snapshot.go`, `persistence.go`).
@@ -88,7 +88,7 @@ These are already implemented in the current codebase:
 
 #### D. `CopyFrom` for raw tick ingestion
 
-**Current**: `flushBatch` in `writer.go` uses `pgx.Batch` to queue individual `INSERT ... ON CONFLICT DO NOTHING` statements.
+**Current**: `flushBatch` in `writer.go` uses a temp staging table plus `CopyFrom`, followed by an `INSERT ... ON CONFLICT DO NOTHING` merge into `raw_ticks`.
 
 **Fix**: Replace with `pgx.CopyFrom` using `pgx.CopyFromSlice`. `CopyFrom` uses the PostgreSQL COPY protocol, which is 2-5x faster for bulk inserts.
 
@@ -113,7 +113,7 @@ INSERT INTO raw_ticks SELECT * FROM _staging ON CONFLICT DO NOTHING;
 
 **Current**: `isDuplicate` in `normalizer.go` holds a single `sync.Mutex` protecting a 100k-entry `map[string]struct{}` and ring buffer.
 
-**Fix**: Shard the dedup map by source name (3 shards for 3 venues). Each shard gets its own mutex. Since events are naturally partitioned by source, contention drops to near-zero.
+**Fix**: Shard the dedup map by source name (one shard per configured venue). Each shard gets its own mutex. Since events are naturally partitioned by source, contention drops to near-zero.
 
 ```go
 type shardedDedup struct {
@@ -239,18 +239,17 @@ Replace in-process channel fan-out with PostgreSQL logical replication or CDC (e
 
 ### 3.2 Compression setting refinements
 
-**raw_ticks — add bloom filter (2.20+)**:
+**raw_ticks — keep compression settings portable**:
 ```sql
 ALTER TABLE raw_ticks SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'source',
-    timescaledb.compress_orderby = 'exchange_ts DESC',
-    timescaledb.compress_bloomfilter = 'trade_id'
+    timescaledb.compress_orderby = 'exchange_ts DESC'
 );
 ```
-**Why**: `trade_id` is high-cardinality and sparse (NULL for ticker events). Bloom filter enables efficient exact-match lookups on compressed chunks without full decompression. Useful for `QueryRawTicks` debug queries filtering by trade.
+**Why**: this matches the current migration and works across the Railway TimescaleDB build in use. The earlier `timescaledb.compress_bloomfilter` tuning was removed because that parameter is not accepted by the deployed service.
 
-**Status**: Implemented in `migrations/001_init.sql` as part of the raw tick compression settings on `raw_ticks`.
+**Status**: Implemented in `migrations/001_init.sql`.
 
 #### Lightning-fast recompression (2.24.0)
 
@@ -269,19 +268,18 @@ WHERE job_id IN (
 
 ### 3.3 Continuous aggregate improvements
 
-#### A. Direct Compress at creation time (2.24.0)
+#### A. Continuous aggregate compression compatibility
 
-**Current**: `001_init.sql` now creates `ohlcv_1m`, `snapshot_rollups_1h`, and `snapshot_rollups_1d` with `timescaledb.compress = true` in the `WITH` clause, while retaining protected `ALTER MATERIALIZED VIEW ... SET (timescaledb.compress = true)` statements for idempotent reruns.
+**Current**: `001_init.sql` creates `ohlcv_1m`, `snapshot_rollups_1h`, and `snapshot_rollups_1d` with `WITH (timescaledb.continuous)` and then enables compression via protected `ALTER MATERIALIZED VIEW ... SET (timescaledb.compress = true)` statements.
 
-**2.24.0 improvement**: Use `timescaledb.compress = true` in the `WITH` clause at creation:
+**Why**: although the extension version is 2.24.0, the deployed Railway build rejects `timescaledb.compress = true` during `CREATE MATERIALIZED VIEW`, so compression is enabled afterward instead:
 ```sql
 CREATE MATERIALIZED VIEW ohlcv_1m
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 ...
 ```
-This eliminates the intermediate materialized hypertable step and is functionally equivalent but cleaner.
 
-**Status**: Implemented in `migrations/001_init.sql`. New deployments get direct-compress creation, while existing deployments keep the same end state via the preserved `ALTER` steps.
+**Status**: Implemented in `migrations/001_init.sql` with guarded `ALTER MATERIALIZED VIEW` and guarded `add_compression_policy(...)` calls.
 
 #### B. Add `snapshot_rollups_1d` hierarchical aggregate
 
@@ -290,7 +288,7 @@ This eliminates the intermediate materialized hypertable step and is functionall
 **Recommended**:
 ```sql
 CREATE MATERIALIZED VIEW snapshot_rollups_1d
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 day', bucket) AS bucket,
     canonical_symbol,
@@ -668,9 +666,9 @@ go test -bench=BenchmarkPipeline -benchmem -timeout 60s ./internal/engine/...
 ### TimescaleDB 2.24.0 Features Used
 
 - [ ] Lightning-fast recompression — automatic after upgrade; test late-arriving inserts
-- [x] Direct Compress with continuous aggregates — `ohlcv_1m`, `snapshot_rollups_1h`, and `snapshot_rollups_1d` use `timescaledb.compress = true` in WITH clause
+- [x] Continuous aggregate compression enabled via guarded `ALTER MATERIALIZED VIEW` statements for Railway-compatible startup
 - [ ] UUIDv7 in continuous aggregates — not needed (no UUID columns in aggregates)
-- [x] Bloom filter sparse indexes — enabled for `raw_ticks.trade_id` (available in TimescaleDB 2.20+)
+- [ ] Bloom filter sparse indexes — not used; removed for compatibility with the Railway TimescaleDB build
 
 **TimescaleDB Version:** 2.24.0+ required
 **Verified At:** 2026-03-22

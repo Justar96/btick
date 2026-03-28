@@ -84,16 +84,25 @@ BEGIN
         END LOOP;
     END IF;
 
-    ALTER TABLE raw_ticks SET (
-        timescaledb.compress,
-        timescaledb.compress_segmentby = 'source',
-        timescaledb.compress_orderby = 'exchange_ts DESC',
-        timescaledb.compress_bloomfilter = 'trade_id');
-EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'raw_ticks compression config: %', SQLERRM;
+    BEGIN
+        ALTER TABLE raw_ticks SET (
+            timescaledb.compress,
+            timescaledb.compress_segmentby = 'source',
+            timescaledb.compress_orderby = 'exchange_ts DESC');
+    EXCEPTION
+        WHEN feature_not_supported OR invalid_parameter_value OR object_not_in_prerequisite_state THEN
+            RAISE WARNING 'raw_ticks compression config skipped: %', SQLERRM;
+    END;
+
 END $$;
-SELECT add_compression_policy('raw_ticks', INTERVAL '2 hours', if_not_exists => TRUE);
-SELECT add_retention_policy('raw_ticks', INTERVAL '1 day', if_not_exists => TRUE);
+DO $$
+BEGIN
+    PERFORM add_compression_policy('raw_ticks', INTERVAL '2 hours', if_not_exists => TRUE);
+EXCEPTION
+    WHEN feature_not_supported OR invalid_parameter_value OR object_not_in_prerequisite_state THEN
+        RAISE WARNING 'raw_ticks compression policy skipped: %', SQLERRM;
+END $$;
+SELECT add_retention_policy('raw_ticks', INTERVAL '3 hours', if_not_exists => TRUE);
 
 -- Irregular canonical price changes
 CREATE TABLE IF NOT EXISTS canonical_ticks (
@@ -120,7 +129,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_ticks_id
 CREATE INDEX IF NOT EXISTS idx_canonical_ticks_ts
     ON canonical_ticks (ts_event DESC);
 
-SELECT add_retention_policy('canonical_ticks', INTERVAL '1 day', if_not_exists => TRUE);
+SELECT add_retention_policy('canonical_ticks', INTERVAL '3 hours', if_not_exists => TRUE);
 
 -- Immutable 1-second snapshots
 CREATE TABLE IF NOT EXISTS snapshots_1s (
@@ -162,15 +171,23 @@ BEGIN
         END LOOP;
     END IF;
 
-    ALTER TABLE snapshots_1s SET (
-        timescaledb.compress,
-        timescaledb.compress_segmentby = '',
-        timescaledb.compress_orderby = 'ts_second DESC');
-EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'snapshots_1s compression config: %', SQLERRM;
+    BEGIN
+        ALTER TABLE snapshots_1s SET (
+            timescaledb.compress,
+            timescaledb.compress_orderby = 'ts_second DESC');
+    EXCEPTION
+        WHEN feature_not_supported OR invalid_parameter_value OR object_not_in_prerequisite_state THEN
+            RAISE WARNING 'snapshots_1s compression config skipped: %', SQLERRM;
+    END;
 END $$;
-SELECT add_compression_policy('snapshots_1s', INTERVAL '1 day', if_not_exists => TRUE);
-SELECT add_retention_policy('snapshots_1s', INTERVAL '365 days', if_not_exists => TRUE);
+DO $$
+BEGIN
+    PERFORM add_compression_policy('snapshots_1s', INTERVAL '1 day', if_not_exists => TRUE);
+EXCEPTION
+    WHEN feature_not_supported OR invalid_parameter_value OR object_not_in_prerequisite_state THEN
+        RAISE WARNING 'snapshots_1s compression policy skipped: %', SQLERRM;
+END $$;
+SELECT add_retention_policy('snapshots_1s', INTERVAL '3 hours', if_not_exists => TRUE);
 
 -- Per-source feed health (regular table, small)
 CREATE TABLE IF NOT EXISTS feed_health (
@@ -189,7 +206,7 @@ CREATE TABLE IF NOT EXISTS feed_health (
 
 -- Continuous aggregate: 1-minute OHLCV candles per source
 CREATE MATERIALIZED VIEW IF NOT EXISTS ohlcv_1m
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 minute', exchange_ts) AS bucket,
     source,
@@ -217,12 +234,18 @@ SELECT add_continuous_aggregate_policy('ohlcv_1m',
     end_offset => INTERVAL '1 minute',
     schedule_interval => INTERVAL '1 minute',
     if_not_exists => TRUE);
-SELECT add_compression_policy('ohlcv_1m', INTERVAL '2 hours', if_not_exists => TRUE);
-SELECT add_retention_policy('ohlcv_1m', INTERVAL '30 days', if_not_exists => TRUE);
+DO $$
+BEGIN
+    PERFORM add_compression_policy('ohlcv_1m', INTERVAL '2 hours', if_not_exists => TRUE);
+EXCEPTION
+    WHEN feature_not_supported OR invalid_parameter_value OR object_not_in_prerequisite_state THEN
+        RAISE WARNING 'ohlcv_1m compression policy skipped: %', SQLERRM;
+END $$;
+SELECT add_retention_policy('ohlcv_1m', INTERVAL '3 hours', if_not_exists => TRUE);
 
 -- Hourly rollups of 1-second snapshots
 CREATE MATERIALIZED VIEW IF NOT EXISTS snapshot_rollups_1h
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 hour', ts_second) AS bucket,
     canonical_symbol,
@@ -250,12 +273,18 @@ SELECT add_continuous_aggregate_policy('snapshot_rollups_1h',
     end_offset => INTERVAL '5 minutes',
     schedule_interval => INTERVAL '5 minutes',
     if_not_exists => TRUE);
-SELECT add_compression_policy('snapshot_rollups_1h', INTERVAL '14 days', if_not_exists => TRUE);
-SELECT add_retention_policy('snapshot_rollups_1h', INTERVAL '365 days', if_not_exists => TRUE);
+DO $$
+BEGIN
+    PERFORM add_compression_policy('snapshot_rollups_1h', INTERVAL '14 days', if_not_exists => TRUE);
+EXCEPTION
+    WHEN feature_not_supported OR invalid_parameter_value OR object_not_in_prerequisite_state THEN
+        RAISE WARNING 'snapshot_rollups_1h compression policy skipped: %', SQLERRM;
+END $$;
+SELECT add_retention_policy('snapshot_rollups_1h', INTERVAL '3 hours', if_not_exists => TRUE);
 
 -- Daily rollups of hourly snapshot aggregates
 CREATE MATERIALIZED VIEW IF NOT EXISTS snapshot_rollups_1d
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 day', bucket) AS bucket,
     canonical_symbol,
@@ -283,4 +312,10 @@ SELECT add_continuous_aggregate_policy('snapshot_rollups_1d',
     end_offset => INTERVAL '1 hour',
     schedule_interval => INTERVAL '1 hour',
     if_not_exists => TRUE);
-SELECT add_compression_policy('snapshot_rollups_1d', INTERVAL '30 days', if_not_exists => TRUE);
+DO $$
+BEGIN
+    PERFORM add_compression_policy('snapshot_rollups_1d', INTERVAL '30 days', if_not_exists => TRUE);
+EXCEPTION
+    WHEN feature_not_supported OR invalid_parameter_value OR object_not_in_prerequisite_state THEN
+        RAISE WARNING 'snapshot_rollups_1d compression policy skipped: %', SQLERRM;
+END $$;

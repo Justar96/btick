@@ -5,7 +5,7 @@ server:
   ws_path: /ws/price
 
 database:
-  dsn: "postgresql://postgres:EcksUDUDEcfkgodMbyxtKmAPoagPPRUs@autorack.proxy.rlwy.net:25333/railway"
+  dsn: "${DATABASE_URL}"
   max_conns: 20
   run_migrations: true
 
@@ -20,10 +20,8 @@ sources:
 
   - name: coinbase
     enabled: true
-    ws_url: "wss://advanced-trade-ws.coinbase.com"
+    ws_url: "wss://ws-feed.exchange.coinbase.com"
     native_symbol: BTC-USD
-    use_book_ticker_fallback: true
-    jwt: ""
     ping_interval_sec: 25
     max_conn_lifetime_sec: 0
 
@@ -35,18 +33,28 @@ sources:
     ping_interval_sec: 30
     max_conn_lifetime_sec: 0
 
+  - name: okx
+    enabled: true
+    ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+    native_symbol: BTC-USDT
+    ping_interval_sec: 20
+    max_conn_lifetime_sec: 0
+
 pricing:
   mode: multi_venue_median
   minimum_healthy_sources: 2
-  trade_freshness_window_ms: 2000
+  trade_freshness_window_ms: 5000
   quote_freshness_window_ms: 1000
   late_arrival_grace_ms: 250
   outlier_reject_pct: 1.0
   carry_forward_max_seconds: 10
+  settlement_reaggregation_window_ms: 5000
 
 storage:
-  raw_retention_days: 14
-  snapshots_retention_days: 365
+  # Go pruner fallback (inactive when TimescaleDB is present).
+  # Actual retention: 3 hours via TimescaleDB policies in migrations/001_init.sql.
+  raw_retention_days: 1
+  snapshots_retention_days: 1
   batch_insert_max_rows: 1000
   batch_insert_max_delay_ms: 200
 

@@ -22,16 +22,18 @@ import (
 // =============================================================================
 
 type mockStore struct {
-	snapshots     []domain.Snapshot1s
-	snapshotsErr  error
-	snapshotAt    *domain.Snapshot1s
-	snapshotAtErr error
-	ticks         []domain.CanonicalTick
-	ticksErr      error
-	rawTicks      []domain.RawEvent
-	rawTicksErr   error
-	feedHealth    []domain.FeedHealth
-	feedHealthErr error
+	snapshots        []domain.Snapshot1s
+	snapshotsErr     error
+	snapshotAt       *domain.Snapshot1s
+	snapshotAtErr    error
+	ticks            []domain.CanonicalTick
+	ticksErr         error
+	rawTicks         []domain.RawEvent
+	rawTicksErr      error
+	closestTrades    []domain.VenueRefPrice
+	closestTradesErr error
+	feedHealth       []domain.FeedHealth
+	feedHealthErr    error
 }
 
 func (m *mockStore) QuerySnapshots(_ context.Context, _, _ time.Time) ([]domain.Snapshot1s, error) {
@@ -45,6 +47,9 @@ func (m *mockStore) QueryCanonicalTicks(_ context.Context, _ int) ([]domain.Cano
 }
 func (m *mockStore) QueryRawTicks(_ context.Context, _ string, _, _ time.Time, _ int) ([]domain.RawEvent, error) {
 	return m.rawTicks, m.rawTicksErr
+}
+func (m *mockStore) QueryClosestTradePerSource(_ context.Context, _ time.Time, _ time.Duration) ([]domain.VenueRefPrice, error) {
+	return m.closestTrades, m.closestTradesErr
 }
 func (m *mockStore) QueryFeedHealth(_ context.Context) ([]domain.FeedHealth, error) {
 	return m.feedHealth, m.feedHealthErr
@@ -75,12 +80,14 @@ func (m *mockEngine) TickCh() <-chan domain.CanonicalTick {
 // testServer creates a Server with the given mocks.
 func testServer(store Store, eng Engine) *Server {
 	return &Server{
-		httpAddr: ":0",
-		wsPath:   "/ws/price",
-		db:       store,
-		engine:   eng,
-		wsHub:    NewWSHub(testLogger(), config.WSConfig{}, nil),
-		logger:   testLogger(),
+		httpAddr:          ":0",
+		wsPath:            "/ws/price",
+		db:                store,
+		engine:            eng,
+		wsHub:             NewWSHub(testLogger(), config.WSConfig{}, nil),
+		logger:            testLogger(),
+		settlementWindow:  5 * time.Second,
+		minHealthySources: 2,
 	}
 }
 
@@ -681,7 +688,7 @@ func TestHandleFeedHealth_NoDB(t *testing.T) {
 
 func TestHandleFeedHealth_TypedNilStore(t *testing.T) {
 	var store *mockStore
-	s := NewServer(":8080", "/ws/price", config.WSConfig{}, store, newMockEngine(nil), testLogger())
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{MinimumHealthySources: 2}, store, newMockEngine(nil), testLogger())
 	rr := httptest.NewRecorder()
 
 	s.handleFeedHealth(rr, httptest.NewRequest("GET", "/v1/health/feeds", nil))
@@ -938,7 +945,7 @@ func TestBroadcastLoop_ChannelClose(t *testing.T) {
 
 func TestNewServer(t *testing.T) {
 	eng := newMockEngine(sampleLatestState())
-	s := NewServer(":8080", "/ws/price", config.WSConfig{}, nil, eng, testLogger())
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, nil, eng, testLogger())
 	if s == nil {
 		t.Fatal("server should not be nil")
 	}
@@ -975,7 +982,7 @@ func TestServerHandler_Metrics(t *testing.T) {
 
 func TestServerRun_StartAndShutdown(t *testing.T) {
 	eng := newMockEngine(sampleLatestState())
-	s := NewServer("127.0.0.1:0", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, nil, eng, testLogger())
+	s := NewServer("127.0.0.1:0", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, config.PricingConfig{}, nil, eng, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -1003,7 +1010,7 @@ func TestServerRun_StartAndShutdown(t *testing.T) {
 func TestServerRun_BadAddr(t *testing.T) {
 	eng := newMockEngine(nil)
 	// Bind to an invalid address to trigger ListenAndServe error
-	s := NewServer("999.999.999.999:99999", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, nil, eng, testLogger())
+	s := NewServer("999.999.999.999:99999", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, config.PricingConfig{}, nil, eng, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

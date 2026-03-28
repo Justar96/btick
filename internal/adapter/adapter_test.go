@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/shopspring/decimal"
 
 	"github.com/justar9/btick/internal/domain"
@@ -221,33 +225,91 @@ func TestFormatBinanceWsURL(t *testing.T) {
 // Coinbase Adapter Tests
 // =============================================================================
 
-func TestCoinbaseAdapter_HandleMarketTrades(t *testing.T) {
+func TestCoinbaseAdapter_Subscribe(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	msgCh := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade failed: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Errorf("read json failed: %v", err)
+			return
+		}
+		msgCh <- msg
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	ca := NewCoinbaseAdapter("wss://test.coinbase.com", "BTC-USD", 30*time.Second, nil, testLogger())
+	if err := ca.subscribe(conn); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if got := msg["type"]; got != "subscribe" {
+			t.Fatalf("expected subscribe message, got %v", got)
+		}
+
+		productIDs, ok := msg["product_ids"].([]any)
+		if !ok || len(productIDs) != 1 || productIDs[0] != "BTC-USD" {
+			t.Fatalf("unexpected product_ids: %#v", msg["product_ids"])
+		}
+
+		channels, ok := msg["channels"].([]any)
+		if !ok {
+			t.Fatalf("unexpected channels: %#v", msg["channels"])
+		}
+
+		gotChannels := make(map[string]bool, len(channels))
+		for _, ch := range channels {
+			name, ok := ch.(string)
+			if !ok {
+				t.Fatalf("channel should be string, got %#v", ch)
+			}
+			gotChannels[name] = true
+		}
+
+		for _, want := range []string{"matches", "ticker", "heartbeat"} {
+			if !gotChannels[want] {
+				t.Fatalf("missing channel %q in %#v", want, gotChannels)
+			}
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout")
+	}
+}
+
+func TestCoinbaseAdapter_HandleMatch(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
 	ca := NewCoinbaseAdapter(
 		"wss://test.coinbase.com",
 		"BTC-USD",
-		"",
 		30*time.Second,
 		outCh,
 		testLogger(),
 	)
 
 	msg := coinbaseMsg{
-		Channel:   "market_trades",
-		Timestamp: "2024-03-10T12:00:00.000Z",
-		Events: []json.RawMessage{
-			json.RawMessage(`{
-				"type": "update",
-				"trades": [{
-					"trade_id": "trade-123",
-					"product_id": "BTC-USD",
-					"price": "84200.00",
-					"size": "0.05",
-					"side": "BUY",
-					"time": "2024-03-10T12:00:00.123456789Z"
-				}]
-			}`),
-		},
+		Type:      "match",
+		ProductID: "BTC-USD",
+		Price:     "84200.00",
+		Size:      "0.05",
+		Side:      "buy",
+		Time:      "2024-03-10T12:00:00.123456789Z",
+		TradeID:   123,
 	}
 	payload, _ := json.Marshal(msg)
 	ca.handleMessage(1, payload, time.Now())
@@ -266,8 +328,8 @@ func TestCoinbaseAdapter_HandleMarketTrades(t *testing.T) {
 		if evt.Side != "buy" {
 			t.Errorf("expected side buy, got %s", evt.Side)
 		}
-		if evt.TradeID != "trade-123" {
-			t.Errorf("expected trade_id trade-123, got %s", evt.TradeID)
+		if evt.TradeID != "123" {
+			t.Errorf("expected trade_id 123, got %s", evt.TradeID)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timeout")
@@ -276,23 +338,15 @@ func TestCoinbaseAdapter_HandleMarketTrades(t *testing.T) {
 
 func TestCoinbaseAdapter_HandleTicker(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", "", 30*time.Second, outCh, testLogger())
+	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", 30*time.Second, outCh, testLogger())
 
 	msg := coinbaseMsg{
-		Channel: "ticker",
-		Events: []json.RawMessage{
-			json.RawMessage(`{
-				"type": "update",
-				"tickers": [{
-					"product_id": "BTC-USD",
-					"price": "84150.00",
-					"best_bid": "84140.00",
-					"best_bid_quantity": "1.0",
-					"best_ask": "84160.00",
-					"best_ask_quantity": "0.5"
-				}]
-			}`),
-		},
+		Type:      "ticker",
+		ProductID: "BTC-USD",
+		Price:     "84150.00",
+		BestBid:   "84140.00",
+		BestAsk:   "84160.00",
+		Time:      "2024-03-10T12:00:00.123456789Z",
 	}
 	payload, _ := json.Marshal(msg)
 	ca.handleMessage(1, payload, time.Now())
@@ -315,20 +369,13 @@ func TestCoinbaseAdapter_HandleTicker(t *testing.T) {
 
 func TestCoinbaseAdapter_SkipsOtherProducts(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", "", 30*time.Second, outCh, testLogger())
+	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", 30*time.Second, outCh, testLogger())
 
 	msg := coinbaseMsg{
-		Channel: "ticker",
-		Events: []json.RawMessage{
-			json.RawMessage(`{
-				"type": "update",
-				"tickers": [{
-					"product_id": "ETH-USD",
-					"best_bid": "3000.00",
-					"best_ask": "3001.00"
-				}]
-			}`),
-		},
+		Type:      "ticker",
+		ProductID: "ETH-USD",
+		BestBid:   "3000.00",
+		BestAsk:   "3001.00",
 	}
 	payload, _ := json.Marshal(msg)
 	ca.handleMessage(1, payload, time.Now())
@@ -341,40 +388,208 @@ func TestCoinbaseAdapter_SkipsOtherProducts(t *testing.T) {
 	}
 }
 
-func TestCoinbaseAdapter_Snapshot(t *testing.T) {
+func TestCoinbaseAdapter_HandleLastMatch(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", "", 30*time.Second, outCh, testLogger())
+	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", 30*time.Second, outCh, testLogger())
 
-	// Snapshot should only emit the most recent trade
 	msg := coinbaseMsg{
-		Channel: "market_trades",
-		Events: []json.RawMessage{
-			json.RawMessage(`{
-				"type": "snapshot",
-				"trades": [
-					{"trade_id": "1", "product_id": "BTC-USD", "price": "84000.00", "size": "0.1", "side": "BUY", "time": "2024-03-10T12:00:00Z"},
-					{"trade_id": "2", "product_id": "BTC-USD", "price": "84100.00", "size": "0.2", "side": "SELL", "time": "2024-03-10T12:00:01Z"}
-				]
-			}`),
-		},
+		Type:      "last_match",
+		ProductID: "BTC-USD",
+		Price:     "84100.00",
+		Size:      "0.2",
+		Side:      "sell",
+		Time:      "2024-03-10T12:00:01Z",
+		TradeID:   2,
 	}
 	payload, _ := json.Marshal(msg)
 	ca.handleMessage(1, payload, time.Now())
 
-	// Should only get 1 event (the first/most recent from snapshot)
 	select {
 	case evt := <-outCh:
-		if evt.TradeID != "1" {
-			t.Errorf("expected first trade from snapshot, got %s", evt.TradeID)
+		if evt.TradeID != "2" {
+			t.Errorf("expected trade id 2 from last_match, got %s", evt.TradeID)
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timeout")
 	}
+}
 
-	// Should not get second event
+// =============================================================================
+// OKX Adapter Tests
+// =============================================================================
+
+func TestOKXAdapter_Subscribe(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	msgCh := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade failed: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Errorf("read json failed: %v", err)
+			return
+		}
+		msgCh <- msg
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	oa := NewOKXAdapter("wss://ws.okx.com:8443/ws/v5/public", "BTC-USDT", 20*time.Second, nil, testLogger())
+	if err := oa.subscribe(conn); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if got := msg["op"]; got != "subscribe" {
+			t.Fatalf("expected subscribe op, got %v", got)
+		}
+
+		args, ok := msg["args"].([]any)
+		if !ok || len(args) != 2 {
+			t.Fatalf("unexpected args: %#v", msg["args"])
+		}
+
+		gotChannels := make(map[string]bool, len(args))
+		for _, rawArg := range args {
+			arg, ok := rawArg.(map[string]any)
+			if !ok {
+				t.Fatalf("arg should be object, got %#v", rawArg)
+			}
+			if instID := arg["instId"]; instID != "BTC-USDT" {
+				t.Fatalf("unexpected instId: %v", instID)
+			}
+			channel, ok := arg["channel"].(string)
+			if !ok {
+				t.Fatalf("channel should be string, got %#v", arg["channel"])
+			}
+			gotChannels[channel] = true
+		}
+
+		for _, want := range []string{"trades", "tickers"} {
+			if !gotChannels[want] {
+				t.Fatalf("missing channel %q in %#v", want, gotChannels)
+			}
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout")
+	}
+}
+
+func TestOKXAdapter_HandleTrade(t *testing.T) {
+	outCh := make(chan domain.RawEvent, 10)
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+
+	payload := []byte(`{
+		"arg": {"channel": "trades", "instId": "BTC-USDT"},
+		"data": [{
+			"instId": "BTC-USDT",
+			"tradeId": "318152841",
+			"px": "61340.9",
+			"sz": "0.001",
+			"side": "buy",
+			"ts": "1682439048575"
+		}]
+	}`)
+	oa.handleMessage(1, payload, time.Now())
+
+	select {
+	case evt := <-outCh:
+		if evt.Source != "okx" {
+			t.Errorf("expected source okx, got %s", evt.Source)
+		}
+		if evt.EventType != "trade" {
+			t.Errorf("expected trade, got %s", evt.EventType)
+		}
+		if evt.TradeID != "318152841" {
+			t.Errorf("expected trade id 318152841, got %s", evt.TradeID)
+		}
+		if !evt.Price.Equal(decimal.RequireFromString("61340.9")) {
+			t.Errorf("expected price 61340.9, got %s", evt.Price)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout")
+	}
+}
+
+func TestOKXAdapter_IgnoresSubscribeAck(t *testing.T) {
+	outCh := make(chan domain.RawEvent, 10)
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+
+	payload := []byte(`{
+		"event": "subscribe",
+		"arg": {"channel": "tickers", "instId": "BTC-USDT"}
+	}`)
+	oa.handleMessage(1, payload, time.Now())
+
 	select {
 	case <-outCh:
-		t.Fatal("should only emit one trade from snapshot")
+		t.Fatal("should not emit event for subscribe acknowledgement")
+	case <-time.After(50 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestOKXAdapter_HandleTicker(t *testing.T) {
+	outCh := make(chan domain.RawEvent, 10)
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+
+	payload := []byte(`{
+		"arg": {"channel": "tickers", "instId": "BTC-USDT"},
+		"data": [{
+			"instId": "BTC-USDT",
+			"askPx": "61341.1",
+			"bidPx": "61340.8",
+			"ts": "1682439048575"
+		}]
+	}`)
+	oa.handleMessage(1, payload, time.Now())
+
+	select {
+	case evt := <-outCh:
+		if evt.EventType != "ticker" {
+			t.Errorf("expected ticker, got %s", evt.EventType)
+		}
+		if !evt.Bid.Equal(decimal.RequireFromString("61340.8")) {
+			t.Errorf("expected bid 61340.8, got %s", evt.Bid)
+		}
+		if !evt.Ask.Equal(decimal.RequireFromString("61341.1")) {
+			t.Errorf("expected ask 61341.1, got %s", evt.Ask)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout")
+	}
+}
+
+func TestOKXAdapter_SkipsOtherInstruments(t *testing.T) {
+	outCh := make(chan domain.RawEvent, 10)
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+
+	payload := []byte(`{
+		"arg": {"channel": "tickers", "instId": "ETH-USDT"},
+		"data": [{
+			"instId": "ETH-USDT",
+			"askPx": "3001.0",
+			"bidPx": "3000.0",
+			"ts": "1682439048575"
+		}]
+	}`)
+	oa.handleMessage(1, payload, time.Now())
+
+	select {
+	case <-outCh:
+		t.Fatal("should not emit event for different instrument")
 	case <-time.After(50 * time.Millisecond):
 		// expected
 	}

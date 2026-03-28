@@ -279,6 +279,40 @@ func (db *DB) QuerySnapshotAt(ctx context.Context, ts time.Time) (*domain.Snapsh
 	return &s, nil
 }
 
+// QueryClosestTradePerSource returns the closest trade per source within a
+// time window around the target timestamp. Used for settlement re-aggregation
+// when the pre-computed snapshot has insufficient source coverage.
+func (db *DB) QueryClosestTradePerSource(ctx context.Context, ts time.Time, window time.Duration) ([]domain.VenueRefPrice, error) {
+	const q = `SELECT DISTINCT ON (source)
+		source, price, exchange_ts,
+		EXTRACT(EPOCH FROM (exchange_ts - $1)) * 1000 AS age_ms
+	FROM raw_ticks
+	WHERE exchange_ts >= $1 - $2::interval
+	  AND exchange_ts <= $1 + $2::interval
+	  AND event_type = 'trade'
+	  AND price IS NOT NULL
+	ORDER BY source, ABS(EXTRACT(EPOCH FROM (exchange_ts - $1)))`
+
+	rows, err := db.Pool.Query(ctx, q, ts, window)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []domain.VenueRefPrice
+	for rows.Next() {
+		var v domain.VenueRefPrice
+		var ageMs float64
+		if err := rows.Scan(&v.Source, &v.RefPrice, &v.EventTS, &ageMs); err != nil {
+			return nil, err
+		}
+		v.Basis = "trade"
+		v.AgeMs = int64(ageMs)
+		results = append(results, v)
+	}
+	return results, rows.Err()
+}
+
 // QueryFeedHealth returns all feed health records.
 func (db *DB) QueryFeedHealth(ctx context.Context) ([]domain.FeedHealth, error) {
 	const q = `SELECT source, conn_state, last_message_ts, last_trade_ts,

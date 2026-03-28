@@ -19,7 +19,7 @@ Stores every normalized event from exchange feeds. Primary source of truth for a
 ```sql
 CREATE TABLE raw_ticks (
     event_id              UUID NOT NULL,            -- UUID v7 (time-ordered)
-    source                TEXT NOT NULL,            -- 'binance', 'coinbase', 'kraken'
+    source                TEXT NOT NULL,            -- 'binance', 'coinbase', 'kraken', 'okx'
     symbol_native         TEXT NOT NULL,            -- Exchange symbol: 'btcusdt', 'BTC-USD'
     symbol_canonical      TEXT NOT NULL,            -- Canonical: 'BTC/USD'
     event_type            TEXT NOT NULL,            -- 'trade' or 'ticker'
@@ -50,13 +50,11 @@ CREATE UNIQUE INDEX idx_raw_ticks_source_trade ON raw_ticks (source, trade_id, e
 ```sql
 ALTER TABLE raw_ticks SET (
     timescaledb.compress,
-    timescaledb.compress_segmentby = 'source, symbol_canonical',
+    timescaledb.compress_segmentby = 'source',
     timescaledb.compress_orderby = 'exchange_ts DESC');
-ALTER TABLE raw_ticks SET (timescaledb.compress_bloomfilter = 'trade_id');
 SELECT add_compression_policy('raw_ticks', INTERVAL '2 hours');
 ```
 
-**Bloom Filter:** `trade_id` bloom filtering is enabled for compressed chunks to speed up exact-match trade lookups without full decompression.
 
 **Row Size:** ~500 bytes average (depends on raw_payload size)
 
@@ -144,7 +142,6 @@ SELECT create_hypertable('snapshots_1s', 'ts_second',
 ```sql
 ALTER TABLE snapshots_1s SET (
     timescaledb.compress,
-    timescaledb.compress_segmentby = 'canonical_symbol',
     timescaledb.compress_orderby = 'ts_second DESC');
 SELECT add_compression_policy('snapshots_1s', INTERVAL '1 day');
 ```
@@ -168,7 +165,7 @@ Current health status of each exchange feed. Updated frequently.
 
 ```sql
 CREATE TABLE feed_health (
-    source              TEXT PRIMARY KEY,          -- 'binance', 'coinbase', 'kraken'
+    source              TEXT PRIMARY KEY,          -- 'binance', 'coinbase', 'kraken', 'okx'
     conn_state          TEXT NOT NULL,             -- 'connected', 'connecting', 'disconnected'
     last_message_ts     TIMESTAMPTZ,               -- Last message received
     last_trade_ts       TIMESTAMPTZ,               -- Last trade received
@@ -182,7 +179,7 @@ CREATE TABLE feed_health (
 );
 ```
 
-**Row Count:** Fixed (3 rows, one per source)
+**Row Count:** Fixed (4 rows, one per source)
 
 ---
 
@@ -250,7 +247,6 @@ Opaque byte payloads:
 
 | Table | Index | Type | Purpose |
 |-------|-------|------|---------|
-| raw_ticks | `idx_raw_ticks_symbol_ts` | B-tree | Query by symbol + time |
 | raw_ticks | `idx_raw_ticks_source_trade` | Unique partial | Deduplication (`source, trade_id, exchange_ts`) |
 | canonical_ticks | `idx_canonical_ticks_id` | Unique | PK equivalent (`tick_id, ts_event`) |
 | canonical_ticks | `idx_canonical_ticks_ts` | B-tree | Time-range queries |
@@ -276,9 +272,9 @@ All time-series tables are TimescaleDB hypertables (required).
 
 | Table | Chunk Interval | Compression Segmentby | Compression Orderby | Compress After |
 |-------|----------------|----------------------|--------------------|---------|
-| `raw_ticks` | 1 hour | `source, symbol_canonical` | `exchange_ts DESC` | 2 hours |
+| `raw_ticks` | 1 hour | `source` | `exchange_ts DESC` | 2 hours |
 | `canonical_ticks` | 1 day | — | — | None (short retention) |
-| `snapshots_1s` | 1 day | `canonical_symbol` | `ts_second DESC` | 1 day |
+| `snapshots_1s` | 1 day | — | `ts_second DESC` | 1 day |
 
 ## Continuous Aggregates
 
@@ -288,7 +284,7 @@ All time-series tables are TimescaleDB hypertables (required).
 
 ```sql
 CREATE MATERIALIZED VIEW ohlcv_1m
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 minute', exchange_ts) AS bucket,
     source,
@@ -313,7 +309,7 @@ Hourly rollups of 1-second snapshots with quality and availability metrics.
 
 ```sql
 CREATE MATERIALIZED VIEW snapshot_rollups_1h
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 hour', ts_second) AS bucket,
     canonical_symbol,
@@ -339,7 +335,7 @@ Daily rollups of hourly snapshot aggregates for long-range dashboards.
 
 ```sql
 CREATE MATERIALIZED VIEW snapshot_rollups_1d
-WITH (timescaledb.continuous, timescaledb.compress = true) AS
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 day', bucket) AS bucket,
     canonical_symbol,

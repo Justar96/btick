@@ -26,10 +26,8 @@ sources:
 
   - name: coinbase
     enabled: true
-    ws_url: "wss://advanced-trade-ws.coinbase.com"
+    ws_url: "wss://ws-feed.exchange.coinbase.com"
     native_symbol: BTC-USD
-    use_book_ticker_fallback: true
-    jwt: ""
     ping_interval_sec: 25
     max_conn_lifetime_sec: 0
 
@@ -39,6 +37,13 @@ sources:
     native_symbol: BTC/USD
     use_ticker_fallback: true
     ping_interval_sec: 30
+    max_conn_lifetime_sec: 0
+
+  - name: okx
+    enabled: true
+    ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+    native_symbol: BTC-USDT
+    ping_interval_sec: 20
     max_conn_lifetime_sec: 0
 
 pricing:

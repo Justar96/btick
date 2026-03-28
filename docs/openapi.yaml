@@ -3,7 +3,7 @@ info:
   title: btick API
   description: |
     Real-time Bitcoin price oracle service for prediction market settlement.
-    Aggregates prices from Binance, Coinbase, and Kraken using multi-venue median pricing.
+    Aggregates prices from Binance, Coinbase, Kraken, and OKX using multi-venue median pricing.
   version: 1.0.0
   contact:
     name: Price Oracle Team
@@ -162,7 +162,7 @@ paths:
           description: Filter by source
           schema:
             type: string
-            enum: [binance, coinbase, kraken]
+              enum: [binance, coinbase, kraken, okx]
         - name: start
           in: query
           required: false
@@ -365,7 +365,7 @@ components:
           format: uuid
         source:
           type: string
-          enum: [binance, coinbase, kraken]
+          enum: [binance, coinbase, kraken, okx]
         event_type:
           type: string
           enum: [trade, ticker]

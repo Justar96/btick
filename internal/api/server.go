@@ -18,6 +18,7 @@ type Store interface {
 	QuerySnapshotAt(ctx context.Context, ts time.Time) (*domain.Snapshot1s, error)
 	QueryCanonicalTicks(ctx context.Context, limit int) ([]domain.CanonicalTick, error)
 	QueryRawTicks(ctx context.Context, source string, start, end time.Time, limit int) ([]domain.RawEvent, error)
+	QueryClosestTradePerSource(ctx context.Context, ts time.Time, window time.Duration) ([]domain.VenueRefPrice, error)
 	QueryFeedHealth(ctx context.Context) ([]domain.FeedHealth, error)
 }
 
@@ -30,14 +31,16 @@ type Engine interface {
 
 // Server is the HTTP/WS API server.
 type Server struct {
-	httpAddr string
-	wsPath   string
-	db       Store
-	engine   Engine
-	wsHub    *WSHub
-	logger   *slog.Logger
-	srv      *http.Server
-	nowFunc  func() time.Time // injectable for testing; defaults to time.Now
+	httpAddr            string
+	wsPath              string
+	db                  Store
+	engine              Engine
+	wsHub               *WSHub
+	logger              *slog.Logger
+	srv                 *http.Server
+	nowFunc             func() time.Time // injectable for testing; defaults to time.Now
+	settlementWindow    time.Duration    // re-aggregation window for degraded/stale settlements
+	minHealthySources   int              // threshold for confirmed vs degraded
 }
 
 func (s *Server) now() time.Time {
@@ -47,14 +50,16 @@ func (s *Server) now() time.Time {
 	return time.Now()
 }
 
-func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, db Store, eng Engine, logger *slog.Logger) *Server {
+func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, pricingCfg config.PricingConfig, db Store, eng Engine, logger *slog.Logger) *Server {
 	s := &Server{
-		httpAddr: httpAddr,
-		wsPath:   wsPath,
-		db:       normalizeStore(db),
-		engine:   eng,
-		wsHub:    NewWSHub(logger, wsCfg, eng.LatestState),
-		logger:   logger.With("component", "api"),
+		httpAddr:          httpAddr,
+		wsPath:            wsPath,
+		db:                normalizeStore(db),
+		engine:            eng,
+		wsHub:             NewWSHub(logger, wsCfg, eng.LatestState),
+		logger:            logger.With("component", "api"),
+		settlementWindow:  pricingCfg.SettlementReaggregationWindow(),
+		minHealthySources: pricingCfg.MinimumHealthySources,
 	}
 	return s
 }
