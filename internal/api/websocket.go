@@ -19,6 +19,7 @@ import (
 type WSMessage struct {
 	Type         string   `json:"type"`
 	Seq          uint64   `json:"seq,omitempty"`
+	Symbol       string   `json:"symbol,omitempty"`
 	TS           string   `json:"ts"`
 	Price        string   `json:"price,omitempty"`
 	Basis        string   `json:"basis,omitempty"`
@@ -86,7 +87,8 @@ type WSHub struct {
 	logger   *slog.Logger
 	wsCfg    config.WSConfig
 	seq      atomic.Uint64
-	getState func() *domain.LatestState
+	getState func(symbol string) *domain.LatestState
+	symbols  []string
 	marshal  func(v any) ([]byte, error) // overridable for testing
 }
 
@@ -105,12 +107,13 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-func NewWSHub(logger *slog.Logger, wsCfg config.WSConfig, getState func() *domain.LatestState) *WSHub {
+func NewWSHub(logger *slog.Logger, wsCfg config.WSConfig, getState func(string) *domain.LatestState, symbols []string) *WSHub {
 	return &WSHub{
 		clients:  make(map[*wsClient]struct{}),
 		logger:   logger.With("component", "ws_hub"),
 		wsCfg:    wsCfg,
 		getState: getState,
+		symbols:  symbols,
 	}
 }
 
@@ -192,11 +195,18 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send initial state.
+	// Send initial state for each configured symbol.
 	if h.getState != nil {
-		if state := h.getState(); state != nil {
+		sentAny := false
+		for _, sym := range h.symbols {
+			state := h.getState(sym)
+			if state == nil {
+				continue
+			}
+			sentAny = true
 			initMsg := WSMessage{
 				Type:         "latest_price",
+				Symbol:       state.Symbol,
 				TS:           state.TS.Format(time.RFC3339Nano),
 				Price:        state.Price.String(),
 				Basis:        state.Basis,
@@ -207,7 +217,7 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				Message:      "initial_state",
 			}
 			if !h.sendHandshake(conn, initMsg) {
-				h.logger.Warn("ws handshake failed: initial_state")
+				h.logger.Warn("ws handshake failed: initial_state", "symbol", sym)
 				h.mu.Lock()
 				delete(h.clients, client)
 				clientCount = len(h.clients)
@@ -216,7 +226,8 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				_ = conn.Close()
 				return
 			}
-		} else {
+		}
+		if !sentAny {
 			noData := WSMessage{
 				Type:    "latest_price",
 				TS:      time.Now().UTC().Format(time.RFC3339Nano),

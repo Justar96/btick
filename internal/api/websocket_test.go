@@ -24,11 +24,11 @@ func testLogger() *slog.Logger {
 }
 
 func testHub() *WSHub {
-	return NewWSHub(testLogger(), config.WSConfig{}, func() *domain.LatestState { return nil })
+	return NewWSHub(testLogger(), config.WSConfig{}, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD"})
 }
 
 func testHubWithState(state *domain.LatestState) *WSHub {
-	return NewWSHub(testLogger(), config.WSConfig{}, func() *domain.LatestState { return state })
+	return NewWSHub(testLogger(), config.WSConfig{}, func(_ string) *domain.LatestState { return state }, []string{"BTC/USD"})
 }
 
 func mustSetReadDeadline(t *testing.T, conn *websocket.Conn, d time.Duration) {
@@ -363,7 +363,7 @@ func TestWSHub_InitialState_NoData(t *testing.T) {
 
 func TestWSHub_InitialState_NilGetState(t *testing.T) {
 	// getState callback is nil — no initial state should be sent
-	hub := NewWSHub(testLogger(), config.WSConfig{}, nil)
+	hub := NewWSHub(testLogger(), config.WSConfig{}, nil, []string{"BTC/USD"})
 
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
 	defer server.Close()
@@ -589,7 +589,7 @@ func TestWSHub_Heartbeat(t *testing.T) {
 	wsCfg := config.WSConfig{
 		HeartbeatIntervalS: 1, // 1 second for test speed
 	}
-	hub := NewWSHub(testLogger(), wsCfg, func() *domain.LatestState { return nil })
+	hub := NewWSHub(testLogger(), wsCfg, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD"})
 
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
 	defer server.Close()
@@ -633,7 +633,7 @@ func TestWSHub_Heartbeat_Unsubscribe(t *testing.T) {
 	wsCfg := config.WSConfig{
 		HeartbeatIntervalS: 1,
 	}
-	hub := NewWSHub(testLogger(), wsCfg, func() *domain.LatestState { return nil })
+	hub := NewWSHub(testLogger(), wsCfg, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD"})
 
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
 	defer server.Close()
@@ -724,7 +724,7 @@ func TestWSHub_PingPong(t *testing.T) {
 		HeartbeatIntervalS: 60, // don't interfere
 		ReadDeadlineS:      5,
 	}
-	hub := NewWSHub(testLogger(), wsCfg, func() *domain.LatestState { return nil })
+	hub := NewWSHub(testLogger(), wsCfg, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD"})
 
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
 	defer server.Close()

@@ -7,14 +7,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SymbolConfig defines a tradable symbol and its exchange sources.
+type SymbolConfig struct {
+	Canonical string         `yaml:"canonical"`
+	Sources   []SourceConfig `yaml:"sources"`
+}
+
 type Config struct {
+	// Multi-symbol configuration (preferred).
+	Symbols []SymbolConfig `yaml:"symbols"`
+
+	// Legacy single-symbol fields — migrated into Symbols on load.
 	CanonicalSymbol string         `yaml:"canonical_symbol"`
-	Server          ServerConfig   `yaml:"server"`
-	Database        DatabaseConfig `yaml:"database"`
 	Sources         []SourceConfig `yaml:"sources"`
-	Pricing         PricingConfig  `yaml:"pricing"`
-	Storage         StorageConfig  `yaml:"storage"`
-	Health          HealthConfig   `yaml:"health"`
+
+	Server   ServerConfig   `yaml:"server"`
+	Database DatabaseConfig `yaml:"database"`
+	Pricing  PricingConfig  `yaml:"pricing"`
+	Storage  StorageConfig  `yaml:"storage"`
+	Health   HealthConfig   `yaml:"health"`
 }
 
 type ServerConfig struct {
@@ -202,6 +213,18 @@ func Load(path string) (*Config, error) {
 	// Allow DATABASE_URL env var to override config
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
 		cfg.Database.DSN = dbURL
+	}
+
+	// Backward compat: migrate legacy single-symbol config into Symbols slice.
+	if len(cfg.Symbols) == 0 && len(cfg.Sources) > 0 {
+		canonical := cfg.CanonicalSymbol
+		if canonical == "" {
+			canonical = "BTC/USD"
+		}
+		cfg.Symbols = []SymbolConfig{{
+			Canonical: canonical,
+			Sources:   cfg.Sources,
+		}}
 	}
 	if cfg.Server.HTTPAddr == "" {
 		cfg.Server.HTTPAddr = ":8080"

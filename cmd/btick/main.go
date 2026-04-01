@@ -62,6 +62,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if len(cfg.Symbols) == 0 {
+		logger.Error("no symbols configured")
+		os.Exit(1)
+	}
+
 	// Context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -100,86 +105,12 @@ func main() {
 		apiDB = ingestDB
 	}
 
-	// Channels
-	// Adapters -> Normalizer
-	rawCh := make(chan domain.RawEvent, 10000)
-	// Normalizer -> (Writer + SnapshotEngine)
-	normalizedCh := make(chan domain.RawEvent, 10000)
-	// Fan-out from normalizedCh to writer and engine
-	writerCh := make(chan domain.RawEvent, 10000)
-	engineCh := make(chan domain.RawEvent, 10000)
-
 	var wg sync.WaitGroup
 
-	// Start feed adapters
-	for _, src := range cfg.Sources {
-		if !src.Enabled {
-			logger.Info("source disabled, skipping", "source", src.Name)
-			continue
-		}
+	// Shared writer channel — all symbols' raw events go to the same DB.
+	writerCh := make(chan domain.RawEvent, 10000)
 
-		s := src
-		safeGo(&wg, cancel, logger, "adapter-"+s.Name, func() {
-			startAdapter(ctx, s, rawCh, logger)
-		})
-	}
-
-	// Normalizer
-	norm := normalizer.New(rawCh, normalizedCh, logger)
-	safeGo(&wg, cancel, logger, "normalizer", func() {
-		norm.Run(ctx)
-	})
-
-	// Fan-out: normalizedCh -> writerCh + engineCh
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(writerCh)
-		defer close(engineCh)
-		var writerDrops, engineDrops int64
-		for {
-			select {
-			case <-ctx.Done():
-				if writerDrops > 0 || engineDrops > 0 {
-					logger.Warn("fan-out final drop counts",
-						"writer_drops", writerDrops,
-						"engine_drops", engineDrops,
-					)
-				}
-				return
-			case evt, ok := <-normalizedCh:
-				if !ok {
-					return
-				}
-				select {
-				case writerCh <- evt:
-				default:
-					writerDrops++
-					metrics.IncChannelDrop("writer")
-					if writerDrops%1000 == 1 {
-						logger.Warn("writer channel full, dropping event",
-							"source", evt.Source,
-							"total_drops", writerDrops,
-						)
-					}
-				}
-				select {
-				case engineCh <- evt:
-				default:
-					engineDrops++
-					metrics.IncChannelDrop("engine")
-					if engineDrops%1000 == 1 {
-						logger.Warn("engine channel full, dropping event",
-							"source", evt.Source,
-							"total_drops", engineDrops,
-						)
-					}
-				}
-			}
-		}
-	}()
-
-	// Raw event writer
+	// Raw event writer (shared across symbols)
 	if ingestDB != nil {
 		writer := storage.NewWriter(ingestDB,
 			cfg.Storage.BatchInsertMaxRows,
@@ -191,22 +122,109 @@ func main() {
 		})
 	}
 
-	// Snapshot engine
-	eng := engine.NewSnapshotEngine(
-		cfg.Pricing,
-		cfg.CanonicalSymbol,
-		cfg.Health.CanonicalStaleAfter(),
-		ingestDB,
-		engineCh,
-		logger,
-	)
-	safeGo(&wg, cancel, logger, "snapshot-engine", func() {
-		eng.Run(ctx)
-	})
+	// Build per-symbol pipelines.
+	engines := make(map[string]*engine.SnapshotEngine, len(cfg.Symbols))
+	symbols := make([]string, 0, len(cfg.Symbols))
 
-	// Note: canonical ticks are written to DB by the snapshot engine directly
-	// and broadcast to WebSocket clients by the API server's broadcast loop.
-	// No separate tick writer goroutine is needed.
+	for _, sym := range cfg.Symbols {
+		canonical := sym.Canonical
+		symbols = append(symbols, canonical)
+		symLogger := logger.With("symbol", canonical)
+
+		// Channels for this symbol's pipeline.
+		rawCh := make(chan domain.RawEvent, 10000)
+		normalizedCh := make(chan domain.RawEvent, 10000)
+		engineCh := make(chan domain.RawEvent, 10000)
+
+		// Collect source names for dedup shard pre-init.
+		sourceNames := make([]string, 0, len(sym.Sources))
+		for _, src := range sym.Sources {
+			sourceNames = append(sourceNames, src.Name)
+		}
+
+		// Start feed adapters for this symbol.
+		for _, src := range sym.Sources {
+			if !src.Enabled {
+				symLogger.Info("source disabled, skipping", "source", src.Name)
+				continue
+			}
+			s := src
+			safeGo(&wg, cancel, logger, "adapter-"+canonical+"-"+s.Name, func() {
+				startAdapter(ctx, s, rawCh, symLogger)
+			})
+		}
+
+		// Normalizer for this symbol.
+		norm := normalizer.New(rawCh, normalizedCh, canonical, sourceNames, symLogger)
+		safeGo(&wg, cancel, logger, "normalizer-"+canonical, func() {
+			norm.Run(ctx)
+		})
+
+		// Fan-out: normalizedCh → shared writerCh + per-symbol engineCh.
+		wg.Add(1)
+		go func(sym string) {
+			defer wg.Done()
+			defer close(engineCh)
+			var writerDrops, engineDrops int64
+			for {
+				select {
+				case <-ctx.Done():
+					if writerDrops > 0 || engineDrops > 0 {
+						symLogger.Warn("fan-out final drop counts",
+							"writer_drops", writerDrops,
+							"engine_drops", engineDrops,
+						)
+					}
+					return
+				case evt, ok := <-normalizedCh:
+					if !ok {
+						return
+					}
+					select {
+					case writerCh <- evt:
+					default:
+						writerDrops++
+						metrics.IncChannelDrop("writer")
+						if writerDrops%1000 == 1 {
+							symLogger.Warn("writer channel full, dropping event",
+								"source", evt.Source,
+								"total_drops", writerDrops,
+							)
+						}
+					}
+					select {
+					case engineCh <- evt:
+					default:
+						engineDrops++
+						metrics.IncChannelDrop("engine")
+						if engineDrops%1000 == 1 {
+							symLogger.Warn("engine channel full, dropping event",
+								"source", evt.Source,
+								"total_drops", engineDrops,
+							)
+						}
+					}
+				}
+			}
+		}(canonical)
+
+		// Snapshot engine for this symbol.
+		eng := engine.NewSnapshotEngine(
+			cfg.Pricing,
+			canonical,
+			cfg.Health.CanonicalStaleAfter(),
+			ingestDB,
+			engineCh,
+			symLogger,
+		)
+		engines[canonical] = eng
+		safeGo(&wg, cancel, logger, "snapshot-engine-"+canonical, func() {
+			eng.Run(ctx)
+		})
+	}
+
+	// MultiEngine aggregates all per-symbol engines for the API.
+	multi := engine.NewMultiEngine(engines, symbols)
 
 	// Retention pruner
 	if ingestDB != nil {
@@ -228,7 +246,7 @@ func main() {
 	}
 
 	// API server
-	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, cfg.Pricing, apiDB, eng, logger)
+	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, cfg.Pricing, apiDB, multi, logger)
 	safeGo(&wg, cancel, logger, "api-server", func() {
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("API server error", "error", err)
@@ -238,6 +256,7 @@ func main() {
 	logger.Info("all components running",
 		"http", cfg.Server.HTTPAddr,
 		"ws", cfg.Server.WSPath,
+		"symbols", symbols,
 	)
 
 	// Wait for shutdown

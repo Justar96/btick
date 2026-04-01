@@ -43,7 +43,7 @@ func BenchmarkPipeline(b *testing.B) {
 	defer cancel()
 
 	logger := benchmarkDiscardLogger()
-	n := normalizer.New(rawCh, normalizedCh, logger)
+	n := normalizer.New(rawCh, normalizedCh, "BTC/USD", []string{"binance"}, logger)
 	eng := newBenchmarkEngine()
 
 	normalizerDone := make(chan struct{})

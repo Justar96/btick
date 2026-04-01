@@ -21,7 +21,7 @@ func testLogger() *slog.Logger {
 func TestNormalizer_AssignsUUID(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 1)
 	outCh := make(chan domain.RawEvent, 1)
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -54,7 +54,7 @@ func TestNormalizer_AssignsUUID(t *testing.T) {
 func TestNormalizer_DeduplicatesTrades(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 10)
 	outCh := make(chan domain.RawEvent, 10)
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -91,7 +91,7 @@ func TestNormalizer_DeduplicatesTrades(t *testing.T) {
 func TestNormalizer_DifferentSourcesSameTradeID(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 10)
 	outCh := make(chan domain.RawEvent, 10)
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,7 +134,7 @@ loop1:
 func TestNormalizer_TickerEventsNotDeduplicated(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 10)
 	outCh := make(chan domain.RawEvent, 10)
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -172,20 +172,17 @@ func TestNormalizer_MapsCanonicalSymbol(t *testing.T) {
 	tests := []struct {
 		source       string
 		nativeSymbol string
-		wantCanon    string
+		canonical    string
 	}{
 		{"binance", "BTCUSDT", "BTC/USD"},
-		{"coinbase", "BTC-USD", "BTC/USD"},
-		{"kraken", "BTC/USD", "BTC/USD"},
-		{"okx", "BTC-USDT", "BTC/USD"},
-		{"unknown", "XYZ", "BTC/USD"},
+		{"coinbase", "ETH-USD", "ETH/USD"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.source, func(t *testing.T) {
+		t.Run(tt.source+"_"+tt.canonical, func(t *testing.T) {
 			inCh := make(chan domain.RawEvent, 1)
 			outCh := make(chan domain.RawEvent, 1)
-			n := New(inCh, outCh, testLogger())
+			n := New(inCh, outCh, tt.canonical, []string{tt.source}, testLogger())
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -203,8 +200,8 @@ func TestNormalizer_MapsCanonicalSymbol(t *testing.T) {
 
 			select {
 			case out := <-outCh:
-				if out.SymbolCanonical != tt.wantCanon {
-					t.Errorf("expected canonical %s, got %s", tt.wantCanon, out.SymbolCanonical)
+				if out.SymbolCanonical != tt.canonical {
+					t.Errorf("expected canonical %s, got %s", tt.canonical, out.SymbolCanonical)
 				}
 			case <-time.After(100 * time.Millisecond):
 				t.Fatal("timeout")
@@ -270,7 +267,7 @@ func TestNormalizer_RingBufferEviction(t *testing.T) {
 func TestNormalizer_ContextCancellation(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 1)
 	outCh := make(chan domain.RawEvent, 1)
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -293,7 +290,7 @@ func TestNormalizer_ContextCancellation(t *testing.T) {
 func TestNormalizer_InputChannelClosed(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 1)
 	outCh := make(chan domain.RawEvent, 1)
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx := context.Background()
 
@@ -316,7 +313,7 @@ func TestNormalizer_InputChannelClosed(t *testing.T) {
 func TestNormalizer_OutputChannelFull(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 10)
 	outCh := make(chan domain.RawEvent, 1) // small buffer
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -354,7 +351,7 @@ func TestNormalizer_OutputChannelFull(t *testing.T) {
 func TestNormalizer_ConcurrentProcessing(t *testing.T) {
 	inCh := make(chan domain.RawEvent, 1000)
 	outCh := make(chan domain.RawEvent, 1000)
-	n := New(inCh, outCh, testLogger())
+	n := New(inCh, outCh, "BTC/USD", []string{"binance", "coinbase", "kraken", "okx"}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -405,29 +402,6 @@ done:
 	}
 }
 
-func TestMapCanonicalSymbol(t *testing.T) {
-	tests := []struct {
-		source string
-		native string
-		want   string
-	}{
-		{"binance", "BTCUSDT", "BTC/USD"},
-		{"binance", "btcusdt", "BTC/USD"},
-		{"coinbase", "BTC-USD", "BTC/USD"},
-		{"kraken", "BTC/USD", "BTC/USD"},
-		{"okx", "BTC-USDT", "BTC/USD"},
-		{"unknown", "ANYTHING", "BTC/USD"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.source+"_"+tt.native, func(t *testing.T) {
-			got := mapCanonicalSymbol(tt.source, tt.native)
-			if got != tt.want {
-				t.Errorf("mapCanonicalSymbol(%s, %s) = %s, want %s", tt.source, tt.native, got, tt.want)
-			}
-		})
-	}
-}
 
 func TestIsDuplicate(t *testing.T) {
 	n := &Normalizer{

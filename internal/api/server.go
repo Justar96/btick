@@ -24,7 +24,8 @@ type Store interface {
 
 // Engine abstracts the snapshot engine used by API handlers.
 type Engine interface {
-	LatestState() *domain.LatestState
+	LatestState(symbol string) *domain.LatestState
+	Symbols() []string
 	SnapshotCh() <-chan domain.Snapshot1s
 	TickCh() <-chan domain.CanonicalTick
 }
@@ -56,7 +57,7 @@ func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, pricingCfg config
 		wsPath:            wsPath,
 		db:                normalizeStore(db),
 		engine:            eng,
-		wsHub:             NewWSHub(logger, wsCfg, eng.LatestState),
+		wsHub:             NewWSHub(logger, wsCfg, eng.LatestState, eng.Symbols()),
 		logger:            logger.With("component", "api"),
 		settlementWindow:  pricingCfg.SettlementReaggregationWindow(),
 		minHealthySources: pricingCfg.MinimumHealthySources,
@@ -147,6 +148,7 @@ func (s *Server) broadcastLoop(ctx context.Context) {
 			}
 			s.wsHub.Broadcast(WSMessage{
 				Type:         "snapshot_1s",
+				Symbol:       snap.CanonicalSymbol,
 				TS:           snap.TSSecond.Format(time.RFC3339Nano),
 				Price:        snap.CanonicalPrice.String(),
 				Basis:        snap.Basis,
@@ -161,6 +163,7 @@ func (s *Server) broadcastLoop(ctx context.Context) {
 			}
 			s.wsHub.Broadcast(WSMessage{
 				Type:         "latest_price",
+				Symbol:       tick.CanonicalSymbol,
 				TS:           tick.TSEvent.Format(time.RFC3339Nano),
 				Price:        tick.CanonicalPrice.String(),
 				Basis:        tick.Basis,

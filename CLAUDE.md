@@ -38,6 +38,7 @@ internal/
   domain/                   # Immutable domain types (RawEvent, CanonicalTick, Snapshot1s, etc.)
   engine/                   # Core pricing logic: median calculation, outlier rejection, snapshots
     snapshot.go             # SnapshotEngine: 1s snapshots, carry-forward, canonical tick generation
+    multi.go                # MultiEngine: aggregates per-symbol engines for the API layer
     persistence.go          # Tick/snapshot DB persistence
   normalizer/               # Event deduplication (sync.Map sharded by source), UUID v7 assignment
   storage/                  # PostgreSQL/TimescaleDB layer (pgx, no ORM)
@@ -54,18 +55,24 @@ docs/                       # API.md, ARCHITECTURE.md, DATABASE.md, DEPLOYMENT.m
 ## Architecture & Data Flow
 
 ```
-Exchanges → Adapters → Normalizer → Fan-out → Engine → API/WebSocket
-                                       ↓         ↓
-                                     Writer    Writer
-                                       ↓         ↓
-                                   PostgreSQL (TimescaleDB)
+Per symbol (BTC/USD, ETH/USD, ...):
+  Exchanges → Adapters[sym] → Normalizer[sym] → Fan-out[sym] → Engine[sym]
+                                                    ↓                ↓
+                                              shared Writer     MultiEngine → API/WebSocket
+                                                    ↓
+                                              PostgreSQL (TimescaleDB)
 ```
 
+- **Multi-symbol**: each symbol gets an independent pipeline (adapters, normalizer, engine).
+- Config supports both legacy single-symbol (`canonical_symbol` + `sources`) and new multi-symbol (`symbols[]`) format.
 - Each adapter runs in its own goroutine with auto-reconnect and exponential backoff.
-- Normalizer deduplicates by `(source, trade_id)` and assigns UUID v7 IDs.
+- Normalizer deduplicates by `(source, trade_id)` and assigns UUID v7 IDs. It stamps the configured canonical symbol on all events.
 - Fan-out uses **non-blocking channel sends** — full channels drop events rather than block.
 - Engine produces 1-second snapshots with median price from healthy sources.
 - Canonical ticks are emitted only on price changes.
+- `MultiEngine` merges snapshot/tick channels from all per-symbol engines and routes `LatestState(symbol)` to the correct engine.
+- REST endpoints accept `?symbol=` query param (defaults to first configured symbol).
+- WebSocket messages include a `symbol` field.
 
 ## Key Conventions
 

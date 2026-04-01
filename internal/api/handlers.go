@@ -12,8 +12,21 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// resolveSymbol returns the canonical symbol from query param, falling back to the first configured symbol.
+func (s *Server) resolveSymbol(r *http.Request) string {
+	if sym := r.URL.Query().Get("symbol"); sym != "" {
+		return sym
+	}
+	syms := s.engine.Symbols()
+	if len(syms) > 0 {
+		return syms[0]
+	}
+	return ""
+}
+
 func (s *Server) handleLatest(w http.ResponseWriter, r *http.Request) {
-	latest := s.engine.LatestState()
+	sym := s.resolveSymbol(r)
+	latest := s.engine.LatestState(sym)
 	if latest == nil {
 		http.Error(w, `{"error":"no data yet"}`, http.StatusServiceUnavailable)
 		return
@@ -198,7 +211,8 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	latest := s.engine.LatestState()
+	sym := s.resolveSymbol(r)
+	latest := s.engine.LatestState(sym)
 
 	status := "ok"
 	if latest == nil {
