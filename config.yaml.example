@@ -1,4 +1,52 @@
-canonical_symbol: BTC/USD
+# Multi-symbol configuration.
+# Each symbol defines its own set of exchange sources.
+symbols:
+  - canonical: BTC/USD
+    sources:
+      - name: binance
+        enabled: true
+        ws_url: "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@bookTicker"
+        native_symbol: btcusdt
+        use_book_ticker_fallback: true
+        ping_interval_sec: 15
+        max_conn_lifetime_sec: 86000
+
+      - name: coinbase
+        enabled: true
+        ws_url: "wss://ws-feed.exchange.coinbase.com"
+        native_symbol: BTC-USD
+        ping_interval_sec: 25
+        max_conn_lifetime_sec: 0
+
+      - name: kraken
+        enabled: true
+        ws_url: "wss://ws.kraken.com/v2"
+        native_symbol: BTC/USD
+        use_ticker_fallback: true
+        ping_interval_sec: 30
+        max_conn_lifetime_sec: 0
+
+      - name: okx
+        enabled: true
+        ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+        native_symbol: BTC-USDT
+        ping_interval_sec: 20
+        max_conn_lifetime_sec: 0
+
+  # Example: add more symbols by duplicating the block above.
+  # - canonical: ETH/USD
+  #   sources:
+  #     - name: binance
+  #       enabled: true
+  #       ws_url: "wss://stream.binance.com:9443/stream?streams=ethusdt@trade/ethusdt@bookTicker"
+  #       native_symbol: ethusdt
+  #       use_book_ticker_fallback: true
+  #       ping_interval_sec: 15
+  #     - name: coinbase
+  #       enabled: true
+  #       ws_url: "wss://ws-feed.exchange.coinbase.com"
+  #       native_symbol: ETH-USD
+  #       ping_interval_sec: 25
 
 server:
   http_addr: ":8080"
@@ -8,43 +56,14 @@ server:
     heartbeat_interval_sec: 5
     ping_interval_sec: 30
     read_deadline_sec: 60
+    max_clients: 1000
+    slow_client_max_drops: 500
 
 database:
   dsn: "${DATABASE_URL}"
   ingest_max_conns: 12
   query_max_conns: 8
   run_migrations: true
-
-sources:
-  - name: binance
-    enabled: true
-    ws_url: "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@bookTicker"
-    native_symbol: btcusdt
-    use_book_ticker_fallback: true
-    ping_interval_sec: 15
-    max_conn_lifetime_sec: 86000
-
-  - name: coinbase
-    enabled: true
-    ws_url: "wss://ws-feed.exchange.coinbase.com"
-    native_symbol: BTC-USD
-    ping_interval_sec: 25
-    max_conn_lifetime_sec: 0
-
-  - name: kraken
-    enabled: true
-    ws_url: "wss://ws.kraken.com/v2"
-    native_symbol: BTC/USD
-    use_ticker_fallback: true
-    ping_interval_sec: 30
-    max_conn_lifetime_sec: 0
-
-  - name: okx
-    enabled: true
-    ws_url: "wss://ws.okx.com:8443/ws/v5/public"
-    native_symbol: BTC-USDT
-    ping_interval_sec: 20
-    max_conn_lifetime_sec: 0
 
 pricing:
   mode: multi_venue_median

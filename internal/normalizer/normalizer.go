@@ -24,23 +24,27 @@ type dedupShard struct {
 
 // Normalizer receives raw events from adapters, assigns UUIDs, deduplicates, and forwards.
 type Normalizer struct {
-	inCh   <-chan domain.RawEvent
-	outCh  chan<- domain.RawEvent
-	logger *slog.Logger
+	inCh            <-chan domain.RawEvent
+	outCh           chan<- domain.RawEvent
+	canonicalSymbol string
+	logger          *slog.Logger
 
 	// Dedup: per-source bounded LRU of (source, trade_id)
 	shards  sync.Map // map[string]*dedupShard
 	maxSeen int
 }
 
-func New(inCh <-chan domain.RawEvent, outCh chan<- domain.RawEvent, logger *slog.Logger) *Normalizer {
+// New creates a Normalizer. canonicalSymbol is stamped on every outgoing event.
+// Pass source names to pre-initialize dedup shards for those sources.
+func New(inCh <-chan domain.RawEvent, outCh chan<- domain.RawEvent, canonicalSymbol string, sources []string, logger *slog.Logger) *Normalizer {
 	n := &Normalizer{
-		inCh:    inCh,
-		outCh:   outCh,
-		logger:  logger.With("component", "normalizer"),
-		maxSeen: defaultMaxSeen,
+		inCh:            inCh,
+		outCh:           outCh,
+		canonicalSymbol: canonicalSymbol,
+		logger:          logger.With("component", "normalizer", "symbol", canonicalSymbol),
+		maxSeen:         defaultMaxSeen,
 	}
-	for _, source := range [...]string{"binance", "coinbase", "kraken", "okx"} {
+	for _, source := range sources {
 		n.shards.Store(source, newDedupShard(n.maxSeen))
 	}
 	return n
@@ -74,8 +78,8 @@ func (n *Normalizer) process(evt domain.RawEvent) {
 		}
 	}
 
-	// Map symbol to canonical
-	evt.SymbolCanonical = mapCanonicalSymbol(evt.Source, evt.SymbolNative)
+	// Stamp canonical symbol
+	evt.SymbolCanonical = n.canonicalSymbol
 
 	select {
 	case n.outCh <- evt:
@@ -143,22 +147,3 @@ func dedupSource(key string) string {
 	return key
 }
 
-func mapCanonicalSymbol(source, native string) string {
-	// All our configured sources map to BTC/USD
-	switch source {
-	case "binance":
-		// btcusdt -> BTC/USD (treating USDT ≈ USD for canonical purposes)
-		return "BTC/USD"
-	case "coinbase":
-		// BTC-USD -> BTC/USD
-		return "BTC/USD"
-	case "kraken":
-		// BTC/USD -> BTC/USD
-		return "BTC/USD"
-	case "okx":
-		// BTC-USDT -> BTC/USD (treating USDT ≈ USD for canonical purposes)
-		return "BTC/USD"
-	default:
-		return "BTC/USD"
-	}
-}
