@@ -20,10 +20,14 @@ type registry struct {
 
 	wsClientsGauge        atomic.Int64
 	wsDropsTotal          atomic.Uint64
+	wsEvictedTotal        atomic.Uint64
+	wsRejectedTotal       atomic.Uint64
+	wsBroadcastsTotal     atomic.Uint64
 	snapshotLagSeconds    atomic.Uint64
 	writerFlushDuration   histogram
 	writerBatchSize       histogram
 	pipelineLatencyMillis histogram
+	wsBroadcastDuration   histogram
 }
 
 type histogram struct {
@@ -48,6 +52,10 @@ func newRegistry() *registry {
 		pipelineLatencyMillis: histogram{
 			buckets: []float64{5, 10, 25, 50, 100, 250, 500, 1000, 5000},
 			counts:  make([]uint64, 9),
+		},
+		wsBroadcastDuration: histogram{
+			buckets: []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5},
+			counts:  make([]uint64, 8),
 		},
 	}
 }
@@ -78,6 +86,22 @@ func SetWSClients(n int) {
 
 func IncWSDrop() {
 	defaultRegistry.wsDropsTotal.Add(1)
+}
+
+func IncWSEvicted() {
+	defaultRegistry.wsEvictedTotal.Add(1)
+}
+
+func IncWSRejected() {
+	defaultRegistry.wsRejectedTotal.Add(1)
+}
+
+func IncWSBroadcast() {
+	defaultRegistry.wsBroadcastsTotal.Add(1)
+}
+
+func ObserveWSBroadcastDuration(d time.Duration) {
+	defaultRegistry.wsBroadcastDuration.observe(d.Seconds())
 }
 
 func Handler() http.Handler {
@@ -125,6 +149,25 @@ func (r *registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		"btick_ws_drops_total",
 		"Total dropped WebSocket broadcast messages.",
 		float64(r.wsDropsTotal.Load()),
+	)
+	r.writeCounter(&b,
+		"btick_ws_evicted_total",
+		"Total WebSocket clients evicted for being too slow.",
+		float64(r.wsEvictedTotal.Load()),
+	)
+	r.writeCounter(&b,
+		"btick_ws_rejected_total",
+		"Total WebSocket connections rejected due to max client limit.",
+		float64(r.wsRejectedTotal.Load()),
+	)
+	r.writeCounter(&b,
+		"btick_ws_broadcasts_total",
+		"Total WebSocket broadcast operations.",
+		float64(r.wsBroadcastsTotal.Load()),
+	)
+	r.wsBroadcastDuration.writePrometheus(&b,
+		"btick_ws_broadcast_duration_seconds",
+		"Duration of WebSocket broadcast operations in seconds.",
 	)
 
 	_, _ = w.Write([]byte(b.String()))

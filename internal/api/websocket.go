@@ -93,12 +93,13 @@ type WSHub struct {
 }
 
 type wsClient struct {
-	conn      *websocket.Conn
-	sendCh    chan []byte
-	closeOnce sync.Once
-	subs      *subscriptions
-	dropCount atomic.Int64
-	logger    *slog.Logger
+	conn       *websocket.Conn
+	sendCh     chan []byte
+	closeOnce  sync.Once
+	subs       *subscriptions
+	dropCount  atomic.Int64
+	logger     *slog.Logger
+	connectedAt time.Time
 }
 
 var upgrader = websocket.Upgrader{
@@ -157,6 +158,18 @@ func (h *WSHub) sendHandshake(conn *websocket.Conn, msg WSMessage) bool {
 }
 
 func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
+	// Check connection limit before upgrading.
+	h.mu.RLock()
+	currentCount := len(h.clients)
+	h.mu.RUnlock()
+
+	if currentCount >= h.wsCfg.MaxClientCount() {
+		h.logger.Warn("ws connection rejected: max clients reached", "max", h.wsCfg.MaxClientCount())
+		metrics.IncWSRejected()
+		http.Error(w, `{"error":"too many connections"}`, http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("ws upgrade failed", "error", err)
@@ -164,10 +177,11 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &wsClient{
-		conn:   conn,
-		sendCh: make(chan []byte, h.wsCfg.SendBuffer()),
-		subs:   newSubscriptions(),
-		logger: h.logger,
+		conn:        conn,
+		sendCh:      make(chan []byte, h.wsCfg.SendBuffer()),
+		subs:        newSubscriptions(),
+		logger:      h.logger,
+		connectedAt: time.Now().UTC(),
 	}
 
 	h.mu.Lock()
@@ -344,9 +358,13 @@ func (h *WSHub) Broadcast(msg WSMessage) {
 		return
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	maxDrops := int64(h.wsCfg.SlowClientMaxDropCount())
+	broadcastStart := time.Now()
 
+	metrics.IncWSBroadcast()
+
+	h.mu.RLock()
+	var evict []*wsClient
 	for c := range h.clients {
 		if !c.subs.wants(msg.Type) {
 			continue
@@ -356,7 +374,9 @@ func (h *WSHub) Broadcast(msg WSMessage) {
 		default:
 			drops := c.dropCount.Add(1)
 			metrics.IncWSDrop()
-			if drops%100 == 1 {
+			if drops >= maxDrops {
+				evict = append(evict, c)
+			} else if drops%100 == 1 {
 				c.logger.Warn("ws client too slow, dropping message",
 					"type", msg.Type,
 					"total_drops", drops,
@@ -364,4 +384,42 @@ func (h *WSHub) Broadcast(msg WSMessage) {
 			}
 		}
 	}
+	h.mu.RUnlock()
+
+	metrics.ObserveWSBroadcastDuration(time.Since(broadcastStart))
+
+	// Evict slow clients outside the read lock.
+	if len(evict) > 0 {
+		h.evictClients(evict)
+	}
+}
+
+// evictClients forcefully disconnects slow clients that exceeded the drop threshold.
+func (h *WSHub) evictClients(clients []*wsClient) {
+	h.mu.Lock()
+	for _, c := range clients {
+		if _, ok := h.clients[c]; !ok {
+			continue // already removed
+		}
+		delete(h.clients, c)
+		c.logger.Warn("evicting slow ws client",
+			"total_drops", c.dropCount.Load(),
+			"connected_for", time.Since(c.connectedAt).Round(time.Second),
+		)
+		close(c.sendCh)
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+		metrics.IncWSEvicted()
+	}
+	clientCount := len(h.clients)
+	h.mu.Unlock()
+	metrics.SetWSClients(clientCount)
+}
+
+// ClientCount returns the current number of connected clients.
+func (h *WSHub) ClientCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
 }

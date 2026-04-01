@@ -39,6 +39,8 @@ type WSConfig struct {
 	HeartbeatIntervalS int `yaml:"heartbeat_interval_sec"`
 	PingIntervalS      int `yaml:"ping_interval_sec"`
 	ReadDeadlineS      int `yaml:"read_deadline_sec"`
+	MaxClients         int `yaml:"max_clients"`
+	SlowClientMaxDrops int `yaml:"slow_client_max_drops"`
 }
 
 func (w WSConfig) SendBuffer() int {
@@ -67,6 +69,20 @@ func (w WSConfig) ReadDeadline() time.Duration {
 		return 60 * time.Second
 	}
 	return time.Duration(w.ReadDeadlineS) * time.Second
+}
+
+func (w WSConfig) MaxClientCount() int {
+	if w.MaxClients <= 0 {
+		return 1000
+	}
+	return w.MaxClients
+}
+
+func (w WSConfig) SlowClientMaxDropCount() int {
+	if w.SlowClientMaxDrops <= 0 {
+		return 500
+	}
+	return w.SlowClientMaxDrops
 }
 
 type DatabaseConfig struct {

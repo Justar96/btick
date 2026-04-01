@@ -1135,6 +1135,111 @@ func TestWSHub_BroadcastDuringClientChurn(t *testing.T) {
 }
 
 // =============================================================================
+// Connection Limit Tests
+// =============================================================================
+
+func TestWSHub_MaxConnectionLimit(t *testing.T) {
+	hub := NewWSHub(testLogger(), config.WSConfig{
+		MaxClients: 3,
+	}, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD"})
+
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[4:]
+
+	// Connect 3 clients (should succeed)
+	conns := make([]*websocket.Conn, 0, 3)
+	for i := 0; i < 3; i++ {
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %d error: %v", i, err)
+		}
+		conns = append(conns, conn)
+		drainMessages(t, conn, 2) // welcome + no_data_yet
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if hub.ClientCount() != 3 {
+		t.Fatalf("expected 3 clients, got %d", hub.ClientCount())
+	}
+
+	// 4th connection should be rejected (HTTP 503)
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		t.Fatal("expected 4th connection to be rejected")
+	}
+	if resp != nil && resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+
+	// Close one, then 4th should succeed
+	_ = conns[0].Close()
+	time.Sleep(100 * time.Millisecond)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial after slot freed: %v", err)
+	}
+	_ = conn.Close()
+
+	for _, c := range conns[1:] {
+		_ = c.Close()
+	}
+}
+
+// =============================================================================
+// Slow Client Eviction Tests
+// =============================================================================
+
+func TestWSHub_SlowClientEviction(t *testing.T) {
+	hub := NewWSHub(testLogger(), config.WSConfig{
+		SendBufferSize:     4,  // tiny buffer
+		SlowClientMaxDrops: 10, // evict after 10 drops
+	}, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD"})
+
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[4:]
+
+	// Connect slow client (don't read from it)
+	slowConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial error: %v", err)
+	}
+	defer func() { _ = slowConn.Close() }()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if hub.ClientCount() != 1 {
+		t.Fatalf("expected 1 client, got %d", hub.ClientCount())
+	}
+
+	// Broadcast enough messages to fill buffer and trigger eviction
+	for i := 0; i < 20; i++ {
+		hub.Broadcast(WSMessage{
+			Type:  "latest_price",
+			Price: "84100.00",
+		})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if hub.ClientCount() != 0 {
+		t.Errorf("expected slow client to be evicted, got %d clients", hub.ClientCount())
+	}
+}
+
+func TestWSHub_ClientCount(t *testing.T) {
+	hub := testHub()
+	if hub.ClientCount() != 0 {
+		t.Errorf("expected 0 clients, got %d", hub.ClientCount())
+	}
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
