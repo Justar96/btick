@@ -92,3 +92,20 @@ type LatestState struct {
 	SourceCount  int             `json:"source_count"`
 	SourcesUsed  []string        `json:"sources_used"`
 }
+
+// SourcePriceEvent is emitted when a venue's latest trade price changes.
+type SourcePriceEvent struct {
+	Symbol string          `json:"symbol"`
+	Source string          `json:"source"`
+	Price  decimal.Decimal `json:"price"`
+	TS     time.Time       `json:"ts"`
+}
+
+// SourceStatusEvent is emitted when a feed's connection state changes.
+type SourceStatusEvent struct {
+	Symbol    string    `json:"symbol"`
+	Source    string    `json:"source"`
+	ConnState string    `json:"conn_state"`
+	Stale     bool      `json:"stale"`
+	TS        time.Time `json:"ts"`
+}
