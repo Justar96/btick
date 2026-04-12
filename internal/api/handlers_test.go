@@ -69,7 +69,8 @@ func newMockEngine(state *domain.LatestState) *mockEngine {
 	}
 }
 
-func (m *mockEngine) LatestState() *domain.LatestState { return m.latestState }
+func (m *mockEngine) LatestState(_ string) *domain.LatestState { return m.latestState }
+func (m *mockEngine) Symbols() []string                        { return []string{"BTC/USD"} }
 func (m *mockEngine) SnapshotCh() <-chan domain.Snapshot1s {
 	return m.snapshotCh
 }
@@ -84,7 +85,7 @@ func testServer(store Store, eng Engine) *Server {
 		wsPath:            "/ws/price",
 		db:                store,
 		engine:            eng,
-		wsHub:             NewWSHub(testLogger(), config.WSConfig{}, nil),
+		wsHub:             NewWSHub(testLogger(), config.WSConfig{}, nil, []string{"BTC/USD"}),
 		logger:            testLogger(),
 		settlementWindow:  5 * time.Second,
 		minHealthySources: 2,
