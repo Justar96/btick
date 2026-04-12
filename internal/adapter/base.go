@@ -23,6 +23,7 @@ type BaseAdapter struct {
 	maxConnLifetime time.Duration
 	onMessage       MessageHandler
 	onConnected     func(conn *websocket.Conn) error // called after connect to send subscribe messages
+	onStateChange   func(name, oldState, newState string)
 	logger          *slog.Logger
 
 	mu              sync.Mutex
@@ -48,6 +49,9 @@ func NewBaseAdapter(name, url string, pingInterval, maxConnLifetime time.Duratio
 
 func (a *BaseAdapter) SetMessageHandler(h MessageHandler)           { a.onMessage = h }
 func (a *BaseAdapter) SetOnConnected(h func(*websocket.Conn) error) { a.onConnected = h }
+func (a *BaseAdapter) SetOnStateChange(h func(name, oldState, newState string)) {
+	a.onStateChange = h
+}
 
 func (a *BaseAdapter) Name() string { return a.name }
 
@@ -77,8 +81,18 @@ func (a *BaseAdapter) ConsecutiveErrors() int {
 
 func (a *BaseAdapter) setConnState(state string) {
 	a.mu.Lock()
+	old := a.connState
+	if state == old {
+		a.mu.Unlock()
+		return
+	}
 	a.connState = state
+	cb := a.onStateChange
 	a.mu.Unlock()
+
+	if cb != nil {
+		cb(a.name, old, state)
+	}
 }
 
 // Run starts the adapter loop, reconnecting on failure. Blocks until ctx is cancelled.
@@ -130,10 +144,10 @@ func (a *BaseAdapter) connectAndRead(ctx context.Context) error {
 
 	a.mu.Lock()
 	a.conn = conn
-	a.connState = "connected"
 	a.consecutiveErrs = 0
 	a.reconnectCount++
 	a.mu.Unlock()
+	a.setConnState("connected")
 
 	a.logger.Info("connected")
 
