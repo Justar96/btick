@@ -24,6 +24,20 @@ import (
 
 const databaseRetryDelay = 5 * time.Second
 
+func resolveLogLevel() slog.Level {
+	level := os.Getenv("BTICK_LOG_LEVEL")
+	if level == "" {
+		level = os.Getenv("LOG_LEVEL")
+	}
+
+	var parsed slog.Level
+	if err := parsed.UnmarshalText([]byte(level)); err != nil {
+		return slog.LevelInfo
+	}
+
+	return parsed
+}
+
 // safeGo runs fn in a goroutine with panic recovery. On panic it logs the
 // stack trace, marks the WaitGroup done, and cancels the context so the
 // rest of the process shuts down cleanly instead of crashing silently.
@@ -51,7 +65,7 @@ func main() {
 
 	// Structured JSON logging
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: resolveLogLevel(),
 	}))
 	slog.SetDefault(logger)
 
@@ -88,7 +102,8 @@ func main() {
 	}
 
 	proxyEngine := engine.NewProxyEngine(symbols)
-	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, cfg.Pricing, nil, proxyEngine, logger)
+	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, cfg.Pricing, cfg.Access, nil, proxyEngine, logger)
+	srv.SetSymbolMetadata(api.BuildSymbolMetadata(cfg.Symbols))
 	safeGo(&wg, cancel, logger, "api-server", func() {
 		if err := srv.Run(ctx); err != nil {
 			logger.Error("API server error", "error", err)
@@ -318,6 +333,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, symbol string, o
 		a := adapter.NewBinanceAdapter(
 			src.WSURL,
 			src.NativeSymbol,
+			symbol,
 			src.PingInterval(),
 			src.MaxConnLifetime(),
 			outCh,
@@ -330,6 +346,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, symbol string, o
 		a := adapter.NewCoinbaseAdapter(
 			src.WSURL,
 			src.NativeSymbol,
+			symbol,
 			src.PingInterval(),
 			outCh,
 			logger,
@@ -341,6 +358,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, symbol string, o
 		a := adapter.NewKrakenAdapter(
 			src.WSURL,
 			src.NativeSymbol,
+			symbol,
 			src.UseTickerFallback,
 			src.PingInterval(),
 			outCh,
@@ -353,6 +371,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, symbol string, o
 		a := adapter.NewOKXAdapter(
 			src.WSURL,
 			src.NativeSymbol,
+			symbol,
 			src.PingInterval(),
 			outCh,
 			logger,
