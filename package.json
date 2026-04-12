@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "workspaces": ["web"],
+  "dependencies": {
+    "cryptocurrency-icons": "^0.18.1"
+  }
+}

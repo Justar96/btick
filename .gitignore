@@ -68,6 +68,12 @@ temp/
 secrets/
 credentials/
 
+# Frontend
+node_modules/
+web/dist/
+bun.lockb
+.superpowers/
+
 # Agents
 .agents/
 .claude/

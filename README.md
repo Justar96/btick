@@ -6,7 +6,7 @@ Manipulation-resistant BTC/USD price from Binance, Coinbase, Kraken, and OKX. Bu
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791?style=flat&logo=postgresql)](https://www.postgresql.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Median across venues, 1-second snapshots, sub-second WebSocket updates, outlier rejection. No API keys needed — all public feeds.
+Median across venues, 1-second snapshots, sub-second WebSocket updates, outlier rejection. Public health/latest endpoints stay open; authenticated tiers can be enabled for snapshots, WebSocket, settlement, and raw access.
 
 ## Get running
 
@@ -21,6 +21,7 @@ go run ./cmd/btick
 curl localhost:8080/v1/health
 curl localhost:8080/v1/price/latest
 wscat -c ws://localhost:8080/ws/price
+curl -X POST localhost:8080/v1/auth/signup -d '{"email":"you@example.com"}' -H 'Content-Type: application/json'
 ```
 
 ## API at a glance
@@ -30,9 +31,11 @@ GET  /v1/price/latest              current canonical price
 GET  /v1/price/settlement?ts=      price at 5-min boundary
 GET  /v1/price/snapshots?start=&end=
 GET  /v1/price/ticks?limit=
+GET  /v1/price/raw                 pro tier
 GET  /v1/health
 GET  /v1/health/feeds
-WS   /ws/price                     live stream (subscribe/unsubscribe filtering)
+POST /v1/auth/signup               create account + api key (when enabled)
+WS   /ws/price                     live stream (starter tier when enabled)
 ```
 
 Full reference, examples, and OpenAPI spec in [docs/API.md](docs/API.md) and [docs/openapi.yaml](docs/openapi.yaml).
