@@ -95,10 +95,11 @@ type LatestState struct {
 
 // SourcePriceEvent is emitted when a venue's latest trade price changes.
 type SourcePriceEvent struct {
-	Symbol string          `json:"symbol"`
-	Source string          `json:"source"`
-	Price  decimal.Decimal `json:"price"`
-	TS     time.Time       `json:"ts"`
+	Symbol    string          `json:"symbol"`
+	Source    string          `json:"source"`
+	Price     decimal.Decimal `json:"price"`
+	TS        time.Time       `json:"ts"`
+	LatencyMs int64           `json:"latency_ms"`
 }
 
 // SourceStatusEvent is emitted when a feed's connection state changes.
@@ -108,4 +109,16 @@ type SourceStatusEvent struct {
 	ConnState string    `json:"conn_state"`
 	Stale     bool      `json:"stale"`
 	TS        time.Time `json:"ts"`
+}
+
+// APIAccount is a provisioned API consumer with a tier and a single active key.
+type APIAccount struct {
+	AccountID    uuid.UUID `json:"account_id"`
+	Email        string    `json:"email"`
+	Name         string    `json:"name,omitempty"`
+	Tier         string    `json:"tier"`
+	APIKeyPrefix string    `json:"api_key_prefix"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastUsedAt   time.Time `json:"last_used_at,omitempty"`
 }
