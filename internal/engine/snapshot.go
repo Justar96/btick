@@ -277,11 +277,20 @@ func (e *SnapshotEngine) emitSourcePrice(evt domain.RawEvent) {
 	e.sourceLastEmit[evt.Source] = now
 	e.sourceThrottleMu.Unlock()
 
+	var latencyMs int64
+	if !evt.ExchangeTS.IsZero() && !evt.RecvTS.IsZero() {
+		lag := evt.RecvTS.Sub(evt.ExchangeTS)
+		if lag > 0 && lag < maxPipelineLatency {
+			latencyMs = lag.Milliseconds()
+		}
+	}
+
 	sp := domain.SourcePriceEvent{
-		Symbol: e.canonicalSymbol,
-		Source: evt.Source,
-		Price:  evt.Price,
-		TS:     evt.ExchangeTS,
+		Symbol:    e.canonicalSymbol,
+		Source:    evt.Source,
+		Price:     evt.Price,
+		TS:        evt.ExchangeTS,
+		LatencyMs: latencyMs,
 	}
 
 	select {
