@@ -57,3 +57,60 @@ func TestDatabaseConfigPoolMaxConns(t *testing.T) {
 		})
 	}
 }
+
+func TestSymbolConfigMetadataDefaults(t *testing.T) {
+	cfg := SymbolConfig{Canonical: "BTC/USD"}
+
+	base, quote := cfg.Assets()
+	if base != "BTC" || quote != "USD" {
+		t.Fatalf("Assets() = (%q, %q), want (%q, %q)", base, quote, "BTC", "USD")
+	}
+	if got := cfg.EffectiveProductType(); got != "price" {
+		t.Fatalf("EffectiveProductType() = %q, want %q", got, "price")
+	}
+	if got := cfg.EffectiveProductSubType(); got != "reference" {
+		t.Fatalf("EffectiveProductSubType() = %q, want %q", got, "reference")
+	}
+	if got := cfg.EffectiveProductName(); got != "BTC/USD Ref Price" {
+		t.Fatalf("EffectiveProductName() = %q, want %q", got, "BTC/USD Ref Price")
+	}
+	if got := cfg.EffectiveMarketHours(); got != "24/7" {
+		t.Fatalf("EffectiveMarketHours() = %q, want %q", got, "24/7")
+	}
+	if got := cfg.EffectiveFeedID(); got != "btick-refprice-btc-usd" {
+		t.Fatalf("EffectiveFeedID() = %q, want %q", got, "btick-refprice-btc-usd")
+	}
+}
+
+func TestSymbolConfigMetadataOverrides(t *testing.T) {
+	cfg := SymbolConfig{
+		Canonical:      "BTC/USD",
+		BaseAsset:      "BTC_CR",
+		QuoteAsset:     "USD_FX",
+		ProductType:    "price",
+		ProductSubType: "reference",
+		ProductName:    "BTC/USD-RefPrice-DS-Premium-Global-003",
+		MarketHours:    "24/7/365",
+		FeedID:         "feed-btc-usd",
+	}
+
+	base, quote := cfg.Assets()
+	if base != "BTC_CR" || quote != "USD_FX" {
+		t.Fatalf("Assets() = (%q, %q), want (%q, %q)", base, quote, "BTC_CR", "USD_FX")
+	}
+	if got := cfg.EffectiveProductType(); got != "price" {
+		t.Fatalf("EffectiveProductType() = %q, want %q", got, "price")
+	}
+	if got := cfg.EffectiveProductSubType(); got != "reference" {
+		t.Fatalf("EffectiveProductSubType() = %q, want %q", got, "reference")
+	}
+	if got := cfg.EffectiveProductName(); got != "BTC/USD-RefPrice-DS-Premium-Global-003" {
+		t.Fatalf("EffectiveProductName() = %q, want %q", got, "BTC/USD-RefPrice-DS-Premium-Global-003")
+	}
+	if got := cfg.EffectiveMarketHours(); got != "24/7/365" {
+		t.Fatalf("EffectiveMarketHours() = %q, want %q", got, "24/7/365")
+	}
+	if got := cfg.EffectiveFeedID(); got != "feed-btc-usd" {
+		t.Fatalf("EffectiveFeedID() = %q, want %q", got, "feed-btc-usd")
+	}
+}

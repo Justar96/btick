@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -9,8 +10,66 @@ import (
 
 // SymbolConfig defines a tradable symbol and its exchange sources.
 type SymbolConfig struct {
-	Canonical string         `yaml:"canonical"`
-	Sources   []SourceConfig `yaml:"sources"`
+	Canonical      string         `yaml:"canonical"`
+	BaseAsset      string         `yaml:"base_asset"`
+	QuoteAsset     string         `yaml:"quote_asset"`
+	ProductType    string         `yaml:"product_type"`
+	ProductSubType string         `yaml:"product_sub_type"`
+	ProductName    string         `yaml:"product_name"`
+	MarketHours    string         `yaml:"market_hours"`
+	FeedID         string         `yaml:"feed_id"`
+	Sources        []SourceConfig `yaml:"sources"`
+}
+
+func (s SymbolConfig) Assets() (string, string) {
+	base := strings.TrimSpace(s.BaseAsset)
+	quote := strings.TrimSpace(s.QuoteAsset)
+	if base != "" || quote != "" {
+		return base, quote
+	}
+	parts := strings.SplitN(strings.TrimSpace(s.Canonical), "/", 2)
+	if len(parts) == 2 {
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return strings.TrimSpace(s.Canonical), ""
+}
+
+func (s SymbolConfig) EffectiveProductType() string {
+	if productType := strings.TrimSpace(s.ProductType); productType != "" {
+		return productType
+	}
+	return "price"
+}
+
+func (s SymbolConfig) EffectiveProductSubType() string {
+	if productSubType := strings.TrimSpace(s.ProductSubType); productSubType != "" {
+		return productSubType
+	}
+	return "reference"
+}
+
+func (s SymbolConfig) EffectiveProductName() string {
+	if productName := strings.TrimSpace(s.ProductName); productName != "" {
+		return productName
+	}
+	return strings.TrimSpace(s.Canonical) + " Ref Price"
+}
+
+func (s SymbolConfig) EffectiveMarketHours() string {
+	if marketHours := strings.TrimSpace(s.MarketHours); marketHours != "" {
+		return marketHours
+	}
+	return "24/7"
+}
+
+func (s SymbolConfig) EffectiveFeedID() string {
+	if feedID := strings.TrimSpace(s.FeedID); feedID != "" {
+		return feedID
+	}
+	normalized := strings.ToLower(strings.TrimSpace(s.Canonical))
+	normalized = strings.ReplaceAll(normalized, "/", "-")
+	normalized = strings.ReplaceAll(normalized, " ", "-")
+	return "btick-refprice-" + normalized
 }
 
 type Config struct {
@@ -26,12 +85,27 @@ type Config struct {
 	Pricing  PricingConfig  `yaml:"pricing"`
 	Storage  StorageConfig  `yaml:"storage"`
 	Health   HealthConfig   `yaml:"health"`
+	Access   AccessConfig   `yaml:"access"`
 }
 
 type ServerConfig struct {
 	HTTPAddr string   `yaml:"http_addr"`
 	WSPath   string   `yaml:"ws_path"`
 	WS       WSConfig `yaml:"ws"`
+}
+
+type AccessConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	SignupEnabled     bool   `yaml:"signup_enabled"`
+	DefaultSignupTier string `yaml:"default_signup_tier"`
+}
+
+func (a AccessConfig) SignupTier() string {
+	tier := a.DefaultSignupTier
+	if tier == "" {
+		return "starter"
+	}
+	return tier
 }
 
 type WSConfig struct {
@@ -161,14 +235,14 @@ func (s SourceConfig) MaxConnLifetime() time.Duration {
 }
 
 type PricingConfig struct {
-	Mode                          string  `yaml:"mode"`
-	MinimumHealthySources         int     `yaml:"minimum_healthy_sources"`
-	TradeFreshnessWindowMs        int     `yaml:"trade_freshness_window_ms"`
-	QuoteFreshnessWindowMs        int     `yaml:"quote_freshness_window_ms"`
-	LateArrivalGraceMs            int     `yaml:"late_arrival_grace_ms"`
-	OutlierRejectPct              float64 `yaml:"outlier_reject_pct"`
-	CarryForwardMaxSeconds        int     `yaml:"carry_forward_max_seconds"`
-	SettlementReaggregationWindowMs int   `yaml:"settlement_reaggregation_window_ms"`
+	Mode                            string  `yaml:"mode"`
+	MinimumHealthySources           int     `yaml:"minimum_healthy_sources"`
+	TradeFreshnessWindowMs          int     `yaml:"trade_freshness_window_ms"`
+	QuoteFreshnessWindowMs          int     `yaml:"quote_freshness_window_ms"`
+	LateArrivalGraceMs              int     `yaml:"late_arrival_grace_ms"`
+	OutlierRejectPct                float64 `yaml:"outlier_reject_pct"`
+	CarryForwardMaxSeconds          int     `yaml:"carry_forward_max_seconds"`
+	SettlementReaggregationWindowMs int     `yaml:"settlement_reaggregation_window_ms"`
 }
 
 func (p PricingConfig) SettlementReaggregationWindow() time.Duration {

@@ -2,6 +2,13 @@
 # Each symbol defines its own set of exchange sources.
 symbols:
   - canonical: BTC/USD
+    base_asset: BTC
+    quote_asset: USD
+    product_type: price
+    product_sub_type: reference
+    product_name: BTC/USD-RefPrice-DS-Premium-Global-003
+    market_hours: 24/7
+    feed_id: btick-refprice-btc-usd
     sources:
       - name: binance
         enabled: true
@@ -33,20 +40,37 @@ symbols:
         ping_interval_sec: 20
         max_conn_lifetime_sec: 0
 
-  # Example: add more symbols by duplicating the block above.
-  # - canonical: ETH/USD
-  #   sources:
-  #     - name: binance
-  #       enabled: true
-  #       ws_url: "wss://stream.binance.com:9443/stream?streams=ethusdt@trade/ethusdt@bookTicker"
-  #       native_symbol: ethusdt
-  #       use_book_ticker_fallback: true
-  #       ping_interval_sec: 15
-  #     - name: coinbase
-  #       enabled: true
-  #       ws_url: "wss://ws-feed.exchange.coinbase.com"
-  #       native_symbol: ETH-USD
-  #       ping_interval_sec: 25
+  - canonical: ETH/USD
+    base_asset: ETH
+    quote_asset: USD
+    product_type: price
+    product_sub_type: reference
+    product_name: ETH/USD-RefPrice-DS-Premium-Global-003
+    market_hours: 24/7
+    feed_id: btick-refprice-eth-usd
+    sources:
+      - name: binance
+        enabled: true
+        ws_url: "wss://stream.binance.com:9443/stream?streams=ethusdt@trade/ethusdt@bookTicker"
+        native_symbol: ethusdt
+        use_book_ticker_fallback: true
+        ping_interval_sec: 15
+      - name: coinbase
+        enabled: true
+        ws_url: "wss://ws-feed.exchange.coinbase.com"
+        native_symbol: ETH-USD
+        ping_interval_sec: 25
+      - name: kraken
+        enabled: true
+        ws_url: "wss://ws.kraken.com/v2"
+        native_symbol: ETH/USD
+        use_ticker_fallback: true
+        ping_interval_sec: 30
+      - name: okx
+        enabled: true
+        ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+        native_symbol: ETH-USDT
+        ping_interval_sec: 20
 
 server:
   http_addr: ":8080"
@@ -84,3 +108,8 @@ storage:
 health:
   source_stale_after_ms: 3000
   canonical_stale_after_ms: 3000
+
+access:
+  enabled: false
+  signup_enabled: false
+  default_signup_tier: starter
