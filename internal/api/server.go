@@ -338,6 +338,18 @@ func sourcePriceToWSMessage(sp domain.SourcePriceEvent) WSMessage {
 	}
 }
 
+// BroadcastSourceStatus broadcasts a source_status message to WS clients.
+func (s *Server) BroadcastSourceStatus(symbol, source, connState string, stale bool) {
+	s.wsHub.Broadcast(WSMessage{
+		Type:      "source_status",
+		Symbol:    symbol,
+		Source:    source,
+		TS:        time.Now().UTC().Format(time.RFC3339Nano),
+		ConnState: connState,
+		Stale:     stale,
+	})
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

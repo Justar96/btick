@@ -22,6 +22,8 @@ import (
 	"github.com/justar9/btick/internal/storage"
 )
 
+const databaseRetryDelay = 5 * time.Second
+
 // safeGo runs fn in a goroutine with panic recovery. On panic it logs the
 // stack trace, marks the WaitGroup done, and cancels the context so the
 // rest of the process shuts down cleanly instead of crashing silently.
@@ -79,90 +81,146 @@ func main() {
 		cancel()
 	}()
 
-	// Database (optional — service can run without DB for testing)
-	var ingestDB *storage.DB
-	var queryDB *storage.DB
-	var apiDB api.Store
-	if cfg.Database.DSN != "" {
-		ingestDB, queryDB, err = storage.NewPools(ctx, cfg.Database, logger)
-		if err != nil {
-			logger.Warn("database connection failed, running without persistence", "error", err)
-		} else {
+	var wg sync.WaitGroup
+	symbols := make([]string, 0, len(cfg.Symbols))
+	for _, sym := range cfg.Symbols {
+		symbols = append(symbols, sym.Canonical)
+	}
+
+	proxyEngine := engine.NewProxyEngine(symbols)
+	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, cfg.Pricing, nil, proxyEngine, logger)
+	safeGo(&wg, cancel, logger, "api-server", func() {
+		if err := srv.Run(ctx); err != nil {
+			logger.Error("API server error", "error", err)
+		}
+	})
+
+	if cfg.Database.DSN == "" {
+		startRuntime(ctx, cancel, &wg, cfg, logger, nil, nil, srv, proxyEngine)
+	} else {
+		safeGo(&wg, cancel, logger, "database-init", func() {
+			waitForDatabaseAndStart(ctx, cancel, &wg, cfg, logger, srv, proxyEngine)
+		})
+	}
+
+	// Wait for shutdown
+	wg.Wait()
+	logger.Info("btick stopped")
+}
+
+func waitForDatabaseAndStart(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	wg *sync.WaitGroup,
+	cfg *config.Config,
+	logger *slog.Logger,
+	srv *api.Server,
+	proxy *engine.ProxyEngine,
+) {
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 15*time.Second)
+		ingestDB, queryDB, err := storage.NewPools(attemptCtx, cfg.Database, logger)
+		attemptCancel()
+		if err == nil {
 			defer ingestDB.Close()
 			if queryDB != nil {
 				defer queryDB.Close()
 			}
-			ingestMaxConns, queryMaxConns := cfg.Database.PoolMaxConns()
-			logger.Info("database connected",
-				"ingest_max_conns", ingestMaxConns,
-				"query_max_conns", queryMaxConns,
-			)
+			startRuntime(ctx, cancel, wg, cfg, logger, ingestDB, queryDB, srv, proxy)
+			<-ctx.Done()
+			return
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		logger.Warn("database connection failed, runtime startup deferred",
+			"error", err,
+			"retry_in", databaseRetryDelay.String(),
+		)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(databaseRetryDelay):
 		}
 	}
+}
+
+func startRuntime(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	wg *sync.WaitGroup,
+	cfg *config.Config,
+	logger *slog.Logger,
+	ingestDB *storage.DB,
+	queryDB *storage.DB,
+	srv *api.Server,
+	proxy *engine.ProxyEngine,
+) {
+	var apiDB api.Store
 	if queryDB != nil {
 		apiDB = queryDB
 	} else if ingestDB != nil {
 		apiDB = ingestDB
 	}
+	srv.SetStore(apiDB)
 
-	var wg sync.WaitGroup
+	if ingestDB != nil {
+		ingestMaxConns, queryMaxConns := cfg.Database.PoolMaxConns()
+		logger.Info("database connected",
+			"ingest_max_conns", ingestMaxConns,
+			"query_max_conns", queryMaxConns,
+		)
+	}
 
-	// Shared writer channel — all symbols' raw events go to the same DB.
 	writerCh := make(chan domain.RawEvent, 10000)
-
-	// Raw event writer (shared across symbols)
 	if ingestDB != nil {
 		writer := storage.NewWriter(ingestDB,
 			cfg.Storage.BatchInsertMaxRows,
 			cfg.Storage.BatchInsertMaxDelay(),
 			logger,
 		)
-		safeGo(&wg, cancel, logger, "writer", func() {
+		safeGo(wg, cancel, logger, "writer", func() {
 			writer.Run(ctx, writerCh)
 		})
 	}
 
-	// Build per-symbol pipelines.
 	engines := make(map[string]*engine.SnapshotEngine, len(cfg.Symbols))
 	symbols := make([]string, 0, len(cfg.Symbols))
-
 	for _, sym := range cfg.Symbols {
 		canonical := sym.Canonical
 		symbols = append(symbols, canonical)
 		symLogger := logger.With("symbol", canonical)
 
-		// Channels for this symbol's pipeline.
 		rawCh := make(chan domain.RawEvent, 10000)
 		normalizedCh := make(chan domain.RawEvent, 10000)
 		engineCh := make(chan domain.RawEvent, 10000)
 
-		// Collect source names for dedup shard pre-init.
 		sourceNames := make([]string, 0, len(sym.Sources))
 		for _, src := range sym.Sources {
 			sourceNames = append(sourceNames, src.Name)
 		}
 
-		// Start feed adapters for this symbol.
 		for _, src := range sym.Sources {
 			if !src.Enabled {
 				symLogger.Info("source disabled, skipping", "source", src.Name)
 				continue
 			}
 			s := src
-			safeGo(&wg, cancel, logger, "adapter-"+canonical+"-"+s.Name, func() {
-				startAdapter(ctx, s, rawCh, symLogger)
+			safeGo(wg, cancel, logger, "adapter-"+canonical+"-"+s.Name, func() {
+				startAdapter(ctx, s, canonical, rawCh, srv, symLogger)
 			})
 		}
 
-		// Normalizer for this symbol.
 		norm := normalizer.New(rawCh, normalizedCh, canonical, sourceNames, symLogger)
-		safeGo(&wg, cancel, logger, "normalizer-"+canonical, func() {
+		safeGo(wg, cancel, logger, "normalizer-"+canonical, func() {
 			norm.Run(ctx)
 		})
 
-		// Fan-out: normalizedCh → shared writerCh + per-symbol engineCh.
 		wg.Add(1)
-		go func(sym string) {
+		go func(symLogger *slog.Logger) {
 			defer wg.Done()
 			defer close(engineCh)
 			var writerDrops, engineDrops int64
@@ -180,16 +238,18 @@ func main() {
 					if !ok {
 						return
 					}
-					select {
-					case writerCh <- evt:
-					default:
-						writerDrops++
-						metrics.IncChannelDrop("writer")
-						if writerDrops%1000 == 1 {
-							symLogger.Warn("writer channel full, dropping event",
-								"source", evt.Source,
-								"total_drops", writerDrops,
-							)
+					if ingestDB != nil {
+						select {
+						case writerCh <- evt:
+						default:
+							writerDrops++
+							metrics.IncChannelDrop("writer")
+							if writerDrops%1000 == 1 {
+								symLogger.Warn("writer channel full, dropping event",
+									"source", evt.Source,
+									"total_drops", writerDrops,
+								)
+							}
 						}
 					}
 					select {
@@ -206,9 +266,8 @@ func main() {
 					}
 				}
 			}
-		}(canonical)
+		}(symLogger)
 
-		// Snapshot engine for this symbol.
 		eng := engine.NewSnapshotEngine(
 			cfg.Pricing,
 			canonical,
@@ -218,53 +277,42 @@ func main() {
 			symLogger,
 		)
 		engines[canonical] = eng
-		safeGo(&wg, cancel, logger, "snapshot-engine-"+canonical, func() {
+		safeGo(wg, cancel, logger, "snapshot-engine-"+canonical, func() {
 			eng.Run(ctx)
 		})
 	}
 
-	// MultiEngine aggregates all per-symbol engines for the API.
-	multi := engine.NewMultiEngine(engines, symbols)
+	proxy.Attach(engine.NewMultiEngine(engines, symbols))
 
-	// Retention pruner
 	if ingestDB != nil {
 		pruner := storage.NewPruner(ingestDB, storage.PrunerConfig{
 			RawRetentionDays:       cfg.Storage.RawRetentionDays,
 			SnapshotsRetentionDays: cfg.Storage.SnapshotsRetentionDays,
 			CanonicalRetentionDays: cfg.Storage.CanonicalRetentionDays,
 		}, logger)
-		safeGo(&wg, cancel, logger, "pruner", func() {
+		safeGo(wg, cancel, logger, "pruner", func() {
 			pruner.Run(ctx)
 		})
-	}
 
-	// Feed health updater
-	if ingestDB != nil {
-		safeGo(&wg, cancel, logger, "feed-health", func() {
+		safeGo(wg, cancel, logger, "feed-health", func() {
 			updateFeedHealth(ctx, cfg, ingestDB, logger)
 		})
 	}
-
-	// API server
-	srv := api.NewServer(cfg.Server.HTTPAddr, cfg.Server.WSPath, cfg.Server.WS, cfg.Pricing, apiDB, multi, logger)
-	safeGo(&wg, cancel, logger, "api-server", func() {
-		if err := srv.Run(ctx); err != nil {
-			logger.Error("API server error", "error", err)
-		}
-	})
 
 	logger.Info("all components running",
 		"http", cfg.Server.HTTPAddr,
 		"ws", cfg.Server.WSPath,
 		"symbols", symbols,
 	)
-
-	// Wait for shutdown
-	wg.Wait()
-	logger.Info("btick stopped")
 }
 
-func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- domain.RawEvent, logger *slog.Logger) {
+func startAdapter(ctx context.Context, src config.SourceConfig, symbol string, outCh chan<- domain.RawEvent, srv *api.Server, logger *slog.Logger) {
+	stateCallback := func(name, oldState, newState string) {
+		if srv != nil {
+			srv.BroadcastSourceStatus(symbol, name, newState, false)
+		}
+	}
+
 	switch src.Name {
 	case "binance":
 		a := adapter.NewBinanceAdapter(
@@ -275,6 +323,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- dom
 			outCh,
 			logger,
 		)
+		a.SetOnStateChange(stateCallback)
 		a.Run(ctx)
 
 	case "coinbase":
@@ -285,6 +334,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- dom
 			outCh,
 			logger,
 		)
+		a.SetOnStateChange(stateCallback)
 		a.Run(ctx)
 
 	case "kraken":
@@ -296,6 +346,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- dom
 			outCh,
 			logger,
 		)
+		a.SetOnStateChange(stateCallback)
 		a.Run(ctx)
 
 	case "okx":
@@ -306,6 +357,7 @@ func startAdapter(ctx context.Context, src config.SourceConfig, outCh chan<- dom
 			outCh,
 			logger,
 		)
+		a.SetOnStateChange(stateCallback)
 		a.Run(ctx)
 
 	default:
