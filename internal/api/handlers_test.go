@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/justar9/btick/internal/config"
 	"github.com/justar9/btick/internal/domain"
 	"github.com/shopspring/decimal"
@@ -34,6 +36,10 @@ type mockStore struct {
 	closestTradesErr error
 	feedHealth       []domain.FeedHealth
 	feedHealthErr    error
+	apiAccounts      map[string]*domain.APIAccount
+	createAccountErr error
+	lookupAccountErr error
+	touchAccountErr  error
 }
 
 func (m *mockStore) QuerySnapshots(_ context.Context, _, _ time.Time) ([]domain.Snapshot1s, error) {
@@ -54,9 +60,55 @@ func (m *mockStore) QueryClosestTradePerSource(_ context.Context, _ time.Time, _
 func (m *mockStore) QueryFeedHealth(_ context.Context) ([]domain.FeedHealth, error) {
 	return m.feedHealth, m.feedHealthErr
 }
+func (m *mockStore) CreateAPIAccount(_ context.Context, email, name, tier, apiKeyHash, apiKeyPrefix string) (*domain.APIAccount, error) {
+	if m.createAccountErr != nil {
+		return nil, m.createAccountErr
+	}
+	if m.apiAccounts == nil {
+		m.apiAccounts = make(map[string]*domain.APIAccount)
+	}
+	for _, account := range m.apiAccounts {
+		if account.Email == email {
+			return nil, errAPIAccountExists
+		}
+	}
+	account := &domain.APIAccount{
+		AccountID:    uuid.New(),
+		Email:        email,
+		Name:         name,
+		Tier:         tier,
+		APIKeyPrefix: apiKeyPrefix,
+		Active:       true,
+		CreatedAt:    time.Now().UTC(),
+	}
+	m.apiAccounts[apiKeyHash] = account
+	return account, nil
+}
+func (m *mockStore) LookupAPIAccountByKeyHash(_ context.Context, apiKeyHash string) (*domain.APIAccount, error) {
+	if m.lookupAccountErr != nil {
+		return nil, m.lookupAccountErr
+	}
+	if m.apiAccounts == nil {
+		return nil, nil
+	}
+	return m.apiAccounts[apiKeyHash], nil
+}
+func (m *mockStore) TouchAPIAccountLastUsed(_ context.Context, accountID string, usedAt time.Time) error {
+	if m.touchAccountErr != nil {
+		return m.touchAccountErr
+	}
+	for _, account := range m.apiAccounts {
+		if account.AccountID.String() == accountID {
+			account.LastUsedAt = usedAt
+			return nil
+		}
+	}
+	return nil
+}
 
 type mockEngine struct {
 	latestState   *domain.LatestState
+	symbols       []string
 	snapshotCh    chan domain.Snapshot1s
 	tickCh        chan domain.CanonicalTick
 	sourcePriceCh chan domain.SourcePriceEvent
@@ -65,16 +117,17 @@ type mockEngine struct {
 func newMockEngine(state *domain.LatestState) *mockEngine {
 	return &mockEngine{
 		latestState:   state,
+		symbols:       []string{"BTC/USD"},
 		snapshotCh:    make(chan domain.Snapshot1s, 10),
 		tickCh:        make(chan domain.CanonicalTick, 10),
 		sourcePriceCh: make(chan domain.SourcePriceEvent, 10),
 	}
 }
 
-func (m *mockEngine) LatestState(_ string) *domain.LatestState { return m.latestState }
-func (m *mockEngine) Symbols() []string                        { return []string{"BTC/USD"} }
-func (m *mockEngine) SnapshotCh() <-chan domain.Snapshot1s     { return m.snapshotCh }
-func (m *mockEngine) TickCh() <-chan domain.CanonicalTick      { return m.tickCh }
+func (m *mockEngine) LatestState(_ string) *domain.LatestState      { return m.latestState }
+func (m *mockEngine) Symbols() []string                             { return m.symbols }
+func (m *mockEngine) SnapshotCh() <-chan domain.Snapshot1s          { return m.snapshotCh }
+func (m *mockEngine) TickCh() <-chan domain.CanonicalTick           { return m.tickCh }
 func (m *mockEngine) SourcePriceCh() <-chan domain.SourcePriceEvent { return m.sourcePriceCh }
 
 // testServer creates a Server with the given mocks.
@@ -698,7 +751,7 @@ func TestHandleFeedHealth_NoDB(t *testing.T) {
 
 func TestHandleFeedHealth_TypedNilStore(t *testing.T) {
 	var store *mockStore
-	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{MinimumHealthySources: 2}, store, newMockEngine(nil), testLogger())
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{MinimumHealthySources: 2}, config.AccessConfig{}, store, newMockEngine(nil), testLogger())
 	rr := httptest.NewRecorder()
 
 	s.handleFeedHealth(rr, httptest.NewRequest("GET", "/v1/health/feeds", nil))
@@ -793,6 +846,101 @@ func TestHandleFeedHealth_Empty(t *testing.T) {
 	}
 }
 
+func TestHandleMetadata_Defaults(t *testing.T) {
+	s := testServer(nil, newMockEngine(nil))
+	rr := httptest.NewRecorder()
+	s.handleMetadata(rr, httptest.NewRequest("GET", "/v1/metadata?symbol=BTC/USD", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	var resp map[string]interface{}
+	decodeJSON(t, rr, &resp)
+	if resp["symbol"] != "BTC/USD" {
+		t.Fatalf("unexpected symbol: %v", resp["symbol"])
+	}
+	if resp["base_asset"] != "BTC" {
+		t.Fatalf("unexpected base_asset: %v", resp["base_asset"])
+	}
+	if resp["quote_asset"] != "USD" {
+		t.Fatalf("unexpected quote_asset: %v", resp["quote_asset"])
+	}
+	if resp["product_type"] != "price" {
+		t.Fatalf("unexpected product_type: %v", resp["product_type"])
+	}
+	if resp["product_sub_type"] != "reference" {
+		t.Fatalf("unexpected product_sub_type: %v", resp["product_sub_type"])
+	}
+	if resp["product_name"] != "BTC/USD Ref Price" {
+		t.Fatalf("unexpected product_name: %v", resp["product_name"])
+	}
+	if resp["market_hours"] != "24/7" {
+		t.Fatalf("unexpected market_hours: %v", resp["market_hours"])
+	}
+	if resp["feed_id"] != "btick-refprice-btc-usd" {
+		t.Fatalf("unexpected feed_id: %v", resp["feed_id"])
+	}
+}
+
+func TestHandleMetadata_ConfiguredOverrides(t *testing.T) {
+	s := testServer(nil, newMockEngine(nil))
+	s.SetSymbolMetadata(BuildSymbolMetadata([]config.SymbolConfig{{
+		Canonical:      "BTC/USD",
+		BaseAsset:      "BTC_CR",
+		QuoteAsset:     "USD_FX",
+		ProductType:    "price",
+		ProductSubType: "reference",
+		ProductName:    "BTC/USD-RefPrice-DS-Premium-Global-003",
+		MarketHours:    "24/7/365",
+		FeedID:         "feed-btc-usd-premium-global-003",
+	}}))
+
+	rr := httptest.NewRecorder()
+	s.handleMetadata(rr, httptest.NewRequest("GET", "/v1/metadata?symbol=BTC/USD", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	var resp map[string]interface{}
+	decodeJSON(t, rr, &resp)
+	if resp["base_asset"] != "BTC_CR" {
+		t.Fatalf("unexpected base_asset: %v", resp["base_asset"])
+	}
+	if resp["quote_asset"] != "USD_FX" {
+		t.Fatalf("unexpected quote_asset: %v", resp["quote_asset"])
+	}
+	if resp["product_type"] != "price" {
+		t.Fatalf("unexpected product_type: %v", resp["product_type"])
+	}
+	if resp["product_sub_type"] != "reference" {
+		t.Fatalf("unexpected product_sub_type: %v", resp["product_sub_type"])
+	}
+	if resp["product_name"] != "BTC/USD-RefPrice-DS-Premium-Global-003" {
+		t.Fatalf("unexpected product_name: %v", resp["product_name"])
+	}
+	if resp["market_hours"] != "24/7/365" {
+		t.Fatalf("unexpected market_hours: %v", resp["market_hours"])
+	}
+	if resp["feed_id"] != "feed-btc-usd-premium-global-003" {
+		t.Fatalf("unexpected feed_id: %v", resp["feed_id"])
+	}
+}
+
+func TestHandleMetadata_UnknownSymbol(t *testing.T) {
+	eng := newMockEngine(nil)
+	eng.symbols = []string{"BTC/USD"}
+	s := testServer(nil, eng)
+	rr := httptest.NewRecorder()
+	s.handleMetadata(rr, httptest.NewRequest("GET", "/v1/metadata?symbol=SOL/USD", nil))
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rr.Code)
+	}
+	expectBodyContains(t, rr, "symbol not found")
+}
+
 // =============================================================================
 // Middleware Tests
 // =============================================================================
@@ -813,10 +961,10 @@ func TestCorsMiddleware_OPTIONS(t *testing.T) {
 	if rr.Header().Get("Access-Control-Allow-Origin") != "*" {
 		t.Error("missing CORS origin header")
 	}
-	if rr.Header().Get("Access-Control-Allow-Methods") != "GET, OPTIONS" {
+	if rr.Header().Get("Access-Control-Allow-Methods") != "GET, POST, OPTIONS" {
 		t.Error("missing CORS methods header")
 	}
-	if rr.Header().Get("Access-Control-Allow-Headers") != "Content-Type" {
+	if rr.Header().Get("Access-Control-Allow-Headers") != "Content-Type, Authorization, X-API-Key" {
 		t.Error("missing CORS allowed-headers header")
 	}
 	// Body should be empty for OPTIONS
@@ -854,6 +1002,209 @@ func TestJsonMiddleware(t *testing.T) {
 	if rr.Header().Get("Content-Type") != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %q", rr.Header().Get("Content-Type"))
 	}
+}
+
+func TestHandleSignup_Created(t *testing.T) {
+	store := &mockStore{}
+	s := testServer(store, newMockEngine(nil))
+	s.accessCfg = config.AccessConfig{Enabled: true, SignupEnabled: true, DefaultSignupTier: "starter"}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/signup", bytes.NewBufferString(`{"email":"alice@example.com","name":"Alice"}`))
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+	var resp map[string]interface{}
+	decodeJSON(t, rr, &resp)
+	if resp["email"] != "alice@example.com" {
+		t.Fatalf("unexpected email: %v", resp["email"])
+	}
+	if resp["tier"] != "starter" {
+		t.Fatalf("unexpected tier: %v", resp["tier"])
+	}
+	apiKey, _ := resp["api_key"].(string)
+	if !strings.HasPrefix(apiKey, "btk_") {
+		t.Fatalf("expected generated api key, got %q", apiKey)
+	}
+}
+
+func TestHandleSignup_Conflict(t *testing.T) {
+	store := &mockStore{apiAccounts: map[string]*domain.APIAccount{
+		hashAPIKey("btk_existing"): {AccountID: uuid.New(), Email: "alice@example.com", Tier: "starter", Active: true},
+	}}
+	s := testServer(store, newMockEngine(nil))
+	s.accessCfg = config.AccessConfig{Enabled: true, SignupEnabled: true, DefaultSignupTier: "starter"}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/signup", bytes.NewBufferString(`{"email":"alice@example.com"}`))
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rr.Code)
+	}
+}
+
+func TestHandleAuthMe_MissingAPIKey(t *testing.T) {
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, config.AccessConfig{Enabled: true}, &mockStore{}, newMockEngine(nil), testLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me", nil)
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	expectBodyContains(t, rr, "api key required")
+}
+
+func TestHandleAuthMe_Success(t *testing.T) {
+	accountID := uuid.New()
+	createdAt := refTime.Add(-time.Hour)
+	store := &mockStore{apiAccounts: map[string]*domain.APIAccount{
+		hashAPIKey("btk_starter"): {
+			AccountID:    accountID,
+			Email:        "starter@example.com",
+			Name:         "Starter User",
+			Tier:         "starter",
+			APIKeyPrefix: "btk_starter",
+			Active:       true,
+			CreatedAt:    createdAt,
+		},
+	}}
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, config.AccessConfig{Enabled: true}, store, newMockEngine(nil), testLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/me", nil)
+	req.Header.Set("Authorization", "Bearer btk_starter")
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-API-Tier"); got != "starter" {
+		t.Fatalf("expected X-API-Tier starter, got %q", got)
+	}
+
+	var resp map[string]any
+	decodeJSON(t, rr, &resp)
+	if resp["account_id"] != accountID.String() {
+		t.Fatalf("unexpected account_id: %v", resp["account_id"])
+	}
+	if resp["email"] != "starter@example.com" {
+		t.Fatalf("unexpected email: %v", resp["email"])
+	}
+	if resp["tier"] != "starter" {
+		t.Fatalf("unexpected tier: %v", resp["tier"])
+	}
+	if resp["active"] != true {
+		t.Fatalf("expected active=true, got %v", resp["active"])
+	}
+	if resp["api_key_prefix"] != "btk_starter" {
+		t.Fatalf("unexpected api_key_prefix: %v", resp["api_key_prefix"])
+	}
+	if resp["created_at"] != createdAt.Format(time.RFC3339Nano) {
+		t.Fatalf("unexpected created_at: %v", resp["created_at"])
+	}
+	if _, ok := resp["last_used_at"]; !ok {
+		t.Fatal("expected last_used_at to be present")
+	}
+	storedAccount := store.apiAccounts[hashAPIKey("btk_starter")]
+	if storedAccount == nil || storedAccount.LastUsedAt.IsZero() {
+		t.Fatal("expected store last_used_at to be updated")
+	}
+}
+
+func TestRequireTier_MissingAPIKey(t *testing.T) {
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, config.AccessConfig{Enabled: true}, &mockStore{}, newMockEngine(nil), testLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/price/snapshots?start=2026-03-19T09:00:00Z", nil)
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	expectBodyContains(t, rr, "api key required")
+}
+
+func TestRequireTier_StarterAllowsSnapshots(t *testing.T) {
+	store := &mockStore{
+		snapshots: []domain.Snapshot1s{{
+			TSSecond:        refTime,
+			CanonicalSymbol: "BTC/USD",
+			CanonicalPrice:  decimal.NewFromInt(84150),
+			Basis:           "median_trade",
+			QualityScore:    decimal.NewFromFloat(0.95),
+			SourceCount:     3,
+			SourcesUsed:     []string{"binance", "coinbase", "kraken"},
+			FinalizedAt:     refTime.Add(time.Second),
+		}},
+		apiAccounts: map[string]*domain.APIAccount{
+			hashAPIKey("btk_starter"): {AccountID: uuid.New(), Email: "starter@example.com", Tier: "starter", Active: true},
+		},
+	}
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, config.AccessConfig{Enabled: true}, store, newMockEngine(nil), testLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/price/snapshots?start=2026-03-19T09:00:00Z", nil)
+	req.Header.Set("X-API-Key", "btk_starter")
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-API-Tier"); got != "starter" {
+		t.Fatalf("expected X-API-Tier starter, got %q", got)
+	}
+	var resp []map[string]interface{}
+	decodeJSON(t, rr, &resp)
+	if len(resp) != 1 {
+		t.Fatalf("expected one snapshot, got %d", len(resp))
+	}
+}
+
+func TestRequireTier_StarterBlockedFromRaw(t *testing.T) {
+	store := &mockStore{apiAccounts: map[string]*domain.APIAccount{
+		hashAPIKey("btk_starter"): {AccountID: uuid.New(), Email: "starter@example.com", Tier: "starter", Active: true},
+	}}
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, config.AccessConfig{Enabled: true}, store, newMockEngine(nil), testLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/price/raw", nil)
+	req.Header.Set("X-API-Key", "btk_starter")
+	s.handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+	expectBodyContains(t, rr, "tier upgrade required")
+}
+
+func TestRequireTier_WebSocketRequiresAPIKey(t *testing.T) {
+	store := &mockStore{apiAccounts: map[string]*domain.APIAccount{
+		hashAPIKey("btk_starter"): {AccountID: uuid.New(), Email: "starter@example.com", Tier: "starter", Active: true},
+	}}
+	s := NewServer(":0", "/ws/price", config.WSConfig{}, config.PricingConfig{}, config.AccessConfig{Enabled: true}, store, newMockEngine(nil), testLogger())
+	server := httptest.NewServer(s.handler())
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[4:] + "/ws/price"
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		t.Fatal("expected websocket dial without api key to fail")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 response, got %+v", resp)
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"?api_key=btk_starter", nil)
+	if err != nil {
+		t.Fatalf("expected websocket dial with api key to succeed: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	drainMessages(t, conn, 2)
 }
 
 // =============================================================================
@@ -962,11 +1313,35 @@ func TestBroadcastLoop_ChannelClose(t *testing.T) {
 	}()
 
 	close(eng.snapshotCh)
+	eng.tickCh <- domain.CanonicalTick{
+		CanonicalSymbol: "BTC/USD",
+		CanonicalPrice:  decimal.NewFromInt(84150),
+		TSEvent:         refTime,
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if s.wsHub.seq.Load() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.wsHub.seq.Load() == 0 {
+		t.Fatal("expected broadcastLoop to continue after one channel closes")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("broadcastLoop should keep running while other channels remain open")
+	default:
+	}
+
+	cancel()
 	select {
 	case <-done:
 		// good
 	case <-time.After(time.Second):
-		t.Fatal("broadcastLoop did not return on channel close")
+		t.Fatal("broadcastLoop did not return on context cancel")
 	}
 }
 
@@ -976,7 +1351,7 @@ func TestBroadcastLoop_ChannelClose(t *testing.T) {
 
 func TestNewServer(t *testing.T) {
 	eng := newMockEngine(sampleLatestState())
-	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, nil, eng, testLogger())
+	s := NewServer(":8080", "/ws/price", config.WSConfig{}, config.PricingConfig{}, config.AccessConfig{}, nil, eng, testLogger())
 	if s == nil {
 		t.Fatal("server should not be nil")
 	}
@@ -1013,7 +1388,7 @@ func TestServerHandler_Metrics(t *testing.T) {
 
 func TestServerRun_StartAndShutdown(t *testing.T) {
 	eng := newMockEngine(sampleLatestState())
-	s := NewServer("127.0.0.1:0", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, config.PricingConfig{}, nil, eng, testLogger())
+	s := NewServer("127.0.0.1:0", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, config.PricingConfig{}, config.AccessConfig{}, nil, eng, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -1041,7 +1416,7 @@ func TestServerRun_StartAndShutdown(t *testing.T) {
 func TestServerRun_BadAddr(t *testing.T) {
 	eng := newMockEngine(nil)
 	// Bind to an invalid address to trigger ListenAndServe error
-	s := NewServer("999.999.999.999:99999", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, config.PricingConfig{}, nil, eng, testLogger())
+	s := NewServer("999.999.999.999:99999", "/ws/price", config.WSConfig{HeartbeatIntervalS: 60}, config.PricingConfig{}, config.AccessConfig{}, nil, eng, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1079,11 +1454,35 @@ func TestBroadcastLoop_TickChannelClose(t *testing.T) {
 	}()
 
 	close(eng.tickCh)
+	eng.snapshotCh <- domain.Snapshot1s{
+		CanonicalSymbol: "BTC/USD",
+		CanonicalPrice:  decimal.NewFromInt(84150),
+		TSSecond:        refTime,
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if s.wsHub.seq.Load() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.wsHub.seq.Load() == 0 {
+		t.Fatal("expected broadcastLoop to continue after tick channel closes")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("broadcastLoop should keep running while other channels remain open")
+	default:
+	}
+
+	cancel()
 	select {
 	case <-done:
 		// good
 	case <-time.After(time.Second):
-		t.Fatal("broadcastLoop did not return on tick channel close")
+		t.Fatal("broadcastLoop did not return on context cancel")
 	}
 }
 

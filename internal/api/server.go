@@ -22,6 +22,9 @@ type Store interface {
 	QueryRawTicks(ctx context.Context, source string, start, end time.Time, limit int) ([]domain.RawEvent, error)
 	QueryClosestTradePerSource(ctx context.Context, ts time.Time, window time.Duration) ([]domain.VenueRefPrice, error)
 	QueryFeedHealth(ctx context.Context) ([]domain.FeedHealth, error)
+	CreateAPIAccount(ctx context.Context, email, name, tier, apiKeyHash, apiKeyPrefix string) (*domain.APIAccount, error)
+	LookupAPIAccountByKeyHash(ctx context.Context, apiKeyHash string) (*domain.APIAccount, error)
+	TouchAPIAccountLastUsed(ctx context.Context, accountID string, usedAt time.Time) error
 }
 
 // Engine abstracts the snapshot engine used by API handlers.
@@ -35,17 +38,19 @@ type Engine interface {
 
 // Server is the HTTP/WS API server.
 type Server struct {
-	httpAddr            string
-	wsPath              string
-	db                  Store
-	dbMu                sync.RWMutex
-	engine              Engine
-	wsHub               *WSHub
-	logger              *slog.Logger
-	srv                 *http.Server
-	nowFunc             func() time.Time // injectable for testing; defaults to time.Now
-	settlementWindow    time.Duration    // re-aggregation window for degraded/stale settlements
-	minHealthySources   int              // threshold for confirmed vs degraded
+	httpAddr          string
+	wsPath            string
+	db                Store
+	dbMu              sync.RWMutex
+	symbolMetadata    symbolMetadataStore
+	engine            Engine
+	wsHub             *WSHub
+	logger            *slog.Logger
+	srv               *http.Server
+	nowFunc           func() time.Time // injectable for testing; defaults to time.Now
+	settlementWindow  time.Duration    // re-aggregation window for degraded/stale settlements
+	minHealthySources int              // threshold for confirmed vs degraded
+	accessCfg         config.AccessConfig
 }
 
 const maxWSBroadcastDrain = 256
@@ -62,7 +67,7 @@ func (s *Server) now() time.Time {
 	return time.Now()
 }
 
-func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, pricingCfg config.PricingConfig, db Store, eng Engine, logger *slog.Logger) *Server {
+func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, pricingCfg config.PricingConfig, accessCfg config.AccessConfig, db Store, eng Engine, logger *slog.Logger) *Server {
 	s := &Server{
 		httpAddr:          httpAddr,
 		wsPath:            wsPath,
@@ -72,6 +77,7 @@ func NewServer(httpAddr, wsPath string, wsCfg config.WSConfig, pricingCfg config
 		logger:            logger.With("component", "api"),
 		settlementWindow:  pricingCfg.SettlementReaggregationWindow(),
 		minHealthySources: pricingCfg.MinimumHealthySources,
+		accessCfg:         accessCfg,
 	}
 	return s
 }
@@ -110,20 +116,34 @@ func (s *Server) SetStore(db Store) {
 
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
+	publicRoute := func(handler http.Handler) http.Handler { return handler }
+	requireStarter := func(handler http.Handler) http.Handler {
+		return s.requireTier("starter", handler)
+	}
+	requirePro := func(handler http.Handler) http.Handler {
+		return s.requireTier("pro", handler)
+	}
 
 	// REST endpoints
-	mux.HandleFunc("GET /v1/price/latest", s.handleLatest)
-	mux.HandleFunc("GET /v1/price/snapshots", s.handleSnapshots)
-	mux.HandleFunc("GET /v1/price/ticks", s.handleTicks)
-	mux.HandleFunc("GET /v1/price/raw", s.handleRaw)
-	mux.HandleFunc("GET /v1/health", s.handleHealth)
-	mux.HandleFunc("GET /v1/health/feeds", s.handleFeedHealth)
-	mux.HandleFunc("GET /v1/price/settlement", s.handleSettlement)
-	mux.HandleFunc("GET /v1/symbols", s.handleSymbols)
-	mux.Handle("GET /metrics", metrics.Handler())
+	mux.Handle("GET /v1/price/latest", publicRoute(http.HandlerFunc(s.handleLatest)))
+	mux.Handle("GET /v1/price/snapshots", requireStarter(http.HandlerFunc(s.handleSnapshots)))
+	mux.Handle("GET /v1/price/ticks", requireStarter(http.HandlerFunc(s.handleTicks)))
+	mux.Handle("GET /v1/price/raw", requirePro(http.HandlerFunc(s.handleRaw)))
+	mux.Handle("GET /v1/health", publicRoute(http.HandlerFunc(s.handleHealth)))
+	mux.Handle("GET /v1/health/feeds", publicRoute(http.HandlerFunc(s.handleFeedHealth)))
+	mux.Handle("GET /v1/price/settlement", requireStarter(http.HandlerFunc(s.handleSettlement)))
+	mux.Handle("GET /v1/symbols", publicRoute(http.HandlerFunc(s.handleSymbols)))
+	mux.Handle("GET /v1/metadata", publicRoute(http.HandlerFunc(s.handleMetadata)))
+	mux.Handle("GET /metrics", publicRoute(metrics.Handler()))
+	if s.accessCfg.Enabled {
+		mux.Handle("GET /v1/auth/me", s.requireTier("", http.HandlerFunc(s.handleAuthMe)))
+	}
+	if s.accessCfg.Enabled && s.accessCfg.SignupEnabled {
+		mux.Handle("POST /v1/auth/signup", http.HandlerFunc(s.handleSignup))
+	}
 
 	// WebSocket
-	mux.HandleFunc("GET "+s.wsPath, s.wsHub.HandleWS)
+	mux.Handle("GET "+s.wsPath, requireStarter(http.HandlerFunc(s.wsHub.HandleWS)))
 
 	// CORS + content-type middleware
 	return corsMiddleware(jsonMiddleware(mux))
@@ -177,7 +197,7 @@ func (s *Server) broadcastLoop(ctx context.Context) {
 		sourcePriceCh = nextSourcePriceCh
 
 		if !ok {
-			if ctx.Err() != nil || snapshotCh == nil {
+			if ctx.Err() != nil || (snapshotCh == nil && tickCh == nil && sourcePriceCh == nil) {
 				return
 			}
 			continue
@@ -197,9 +217,13 @@ func (s *Server) nextBroadcastBatch(
 ) ([]WSMessage, <-chan domain.Snapshot1s, <-chan domain.CanonicalTick, <-chan domain.SourcePriceEvent, bool) {
 	pending := make(map[string]orderedWSMessage, maxWSBroadcastDrain)
 	order := 0
+	coalesced := 0
 
 	record := func(msg WSMessage) {
 		key := msg.Type + "\x00" + msg.Symbol + "\x00" + msg.Source
+		if _, ok := pending[key]; ok {
+			coalesced++
+		}
 		pending[key] = orderedWSMessage{msg: msg, order: order}
 		order++
 	}
@@ -239,6 +263,8 @@ func (s *Server) nextBroadcastBatch(
 		batch = append(batch, entry.msg)
 	}
 
+	metrics.AddWSCoalesced(coalesced)
+
 	return batch, snapshotCh, tickCh, sourcePriceCh, true
 }
 
@@ -260,17 +286,20 @@ func (s *Server) nextBroadcastMessage(
 				return WSMessage{}, snapshotCh, tickCh, sourcePriceCh, false
 			case snap, ok := <-snapshotCh:
 				if !ok {
-					return WSMessage{}, nil, nil, nil, false
+					snapshotCh = nil
+					continue
 				}
 				return snapshotToWSMessage(snap), snapshotCh, tickCh, sourcePriceCh, true
 			case tick, ok := <-tickCh:
 				if !ok {
-					return WSMessage{}, nil, nil, nil, false
+					tickCh = nil
+					continue
 				}
 				return tickToWSMessage(tick), snapshotCh, tickCh, sourcePriceCh, true
 			case sp, ok := <-sourcePriceCh:
 				if !ok {
-					return WSMessage{}, nil, nil, nil, false
+					sourcePriceCh = nil
+					continue
 				}
 				return sourcePriceToWSMessage(sp), snapshotCh, tickCh, sourcePriceCh, true
 			}
@@ -279,17 +308,20 @@ func (s *Server) nextBroadcastMessage(
 		select {
 		case snap, ok := <-snapshotCh:
 			if !ok {
-				return WSMessage{}, nil, nil, nil, false
+				snapshotCh = nil
+				continue
 			}
 			return snapshotToWSMessage(snap), snapshotCh, tickCh, sourcePriceCh, true
 		case tick, ok := <-tickCh:
 			if !ok {
-				return WSMessage{}, nil, nil, nil, false
+				tickCh = nil
+				continue
 			}
 			return tickToWSMessage(tick), snapshotCh, tickCh, sourcePriceCh, true
 		case sp, ok := <-sourcePriceCh:
 			if !ok {
-				return WSMessage{}, nil, nil, nil, false
+				sourcePriceCh = nil
+				continue
 			}
 			return sourcePriceToWSMessage(sp), snapshotCh, tickCh, sourcePriceCh, true
 		default:
@@ -315,26 +347,28 @@ func snapshotToWSMessage(snap domain.Snapshot1s) WSMessage {
 
 func tickToWSMessage(tick domain.CanonicalTick) WSMessage {
 	return WSMessage{
-		Type:         "latest_price",
-		Symbol:       tick.CanonicalSymbol,
-		TS:           tick.TSEvent.Format(time.RFC3339Nano),
-		Price:        tick.CanonicalPrice.String(),
-		Basis:        tick.Basis,
-		IsStale:      tick.IsStale,
-		IsDegraded:   tick.IsDegraded,
-		QualityScore: tick.QualityScore.String(),
-		SourceCount:  tick.SourceCount,
-		SourcesUsed:  tick.SourcesUsed,
+		Type:          "latest_price",
+		Symbol:        tick.CanonicalSymbol,
+		TS:            tick.TSEvent.Format(time.RFC3339Nano),
+		Price:         tick.CanonicalPrice.String(),
+		Basis:         tick.Basis,
+		IsStale:       tick.IsStale,
+		IsDegraded:    tick.IsDegraded,
+		QualityScore:  tick.QualityScore.String(),
+		SourceCount:   tick.SourceCount,
+		SourcesUsed:   tick.SourcesUsed,
+		SourceDetails: tick.SourceDetailsJSON,
 	}
 }
 
 func sourcePriceToWSMessage(sp domain.SourcePriceEvent) WSMessage {
 	return WSMessage{
-		Type:   "source_price",
-		Symbol: sp.Symbol,
-		Source: sp.Source,
-		TS:     sp.TS.Format(time.RFC3339Nano),
-		Price:  sp.Price.String(),
+		Type:      "source_price",
+		Symbol:    sp.Symbol,
+		Source:    sp.Source,
+		TS:        sp.TS.Format(time.RFC3339Nano),
+		Price:     sp.Price.String(),
+		LatencyMs: sp.LatencyMs,
 	}
 }
 
@@ -353,8 +387,8 @@ func (s *Server) BroadcastSourceStatus(symbol, source, connState string, stale b
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return

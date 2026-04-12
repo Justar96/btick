@@ -71,12 +71,13 @@ func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.db == nil {
+	db := s.store()
+	if db == nil {
 		http.Error(w, `{"error":"database not available"}`, http.StatusServiceUnavailable)
 		return
 	}
 
-	snapshots, err := s.db.QuerySnapshots(r.Context(), start, end)
+	snapshots, err := db.QuerySnapshots(r.Context(), start, end)
 	if err != nil {
 		s.logger.Error("query snapshots failed", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -113,12 +114,13 @@ func (s *Server) handleTicks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.db == nil {
+	db := s.store()
+	if db == nil {
 		http.Error(w, `{"error":"database not available"}`, http.StatusServiceUnavailable)
 		return
 	}
 
-	ticks, err := s.db.QueryCanonicalTicks(r.Context(), limit)
+	ticks, err := db.QueryCanonicalTicks(r.Context(), limit)
 	if err != nil {
 		s.logger.Error("query ticks failed", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -177,12 +179,13 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.db == nil {
+	db := s.store()
+	if db == nil {
 		http.Error(w, `{"error":"database not available"}`, http.StatusServiceUnavailable)
 		return
 	}
 
-	events, err := s.db.QueryRawTicks(r.Context(), source, start, end, limit)
+	events, err := db.QueryRawTicks(r.Context(), source, start, end, limit)
 	if err != nil {
 		s.logger.Error("query raw ticks failed", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -213,6 +216,7 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	sym := s.resolveSymbol(r)
 	latest := s.engine.LatestState(sym)
+	databaseReady := s.hasStore()
 
 	status := "ok"
 	if latest == nil {
@@ -226,6 +230,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"status":    status,
 		"timestamp": s.now().UTC().Format(time.RFC3339Nano),
+		"dependencies": map[string]interface{}{
+			"database": map[string]interface{}{
+				"ready": databaseReady,
+			},
+		},
 	}
 	if latest != nil {
 		resp["latest_price"] = latest.Price.String()
@@ -271,12 +280,13 @@ func (s *Server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.db == nil {
+	db := s.store()
+	if db == nil {
 		http.Error(w, `{"error":"database not available"}`, http.StatusServiceUnavailable)
 		return
 	}
 
-	snapshot, err := s.db.QuerySnapshotAt(r.Context(), ts)
+	snapshot, err := db.QuerySnapshotAt(r.Context(), ts)
 	if err != nil {
 		s.logger.Error("query settlement snapshot failed", "error", err, "ts", ts)
 		http.Error(w, `{"error":"settlement price not found for this timestamp"}`, http.StatusNotFound)
@@ -296,12 +306,13 @@ func (s *Server) handleSettlement(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFeedHealth(w http.ResponseWriter, r *http.Request) {
-	if s.db == nil {
+	db := s.store()
+	if db == nil {
 		http.Error(w, `{"error":"database not available"}`, http.StatusServiceUnavailable)
 		return
 	}
 
-	feeds, err := s.db.QueryFeedHealth(r.Context())
+	feeds, err := db.QueryFeedHealth(r.Context())
 	if err != nil {
 		s.logger.Error("query feed health failed", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -336,6 +347,10 @@ func (s *Server) handleFeedHealth(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, resp)
 }
 
+func (s *Server) handleSymbols(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, s.engine.Symbols())
+}
+
 func (s *Server) writeJSON(w http.ResponseWriter, v interface{}) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		s.logger.Error("encode response", "err", err)
@@ -362,7 +377,16 @@ func (s *Server) buildSettlementResp(ts time.Time, snap *domain.Snapshot1s, stat
 // when the pre-computed snapshot is degraded or stale. Falls back to the
 // original snapshot if re-aggregation doesn't improve source coverage.
 func (s *Server) tryReaggregate(ctx context.Context, ts time.Time, original *domain.Snapshot1s) map[string]interface{} {
-	trades, err := s.db.QueryClosestTradePerSource(ctx, ts, s.settlementWindow)
+	db := s.store()
+	if db == nil {
+		status := "stale"
+		if !original.IsStale && original.IsDegraded {
+			status = "degraded"
+		}
+		return s.buildSettlementResp(ts, original, status)
+	}
+
+	trades, err := db.QueryClosestTradePerSource(ctx, ts, s.settlementWindow)
 	if err != nil || len(trades) == 0 {
 		// Re-aggregation failed or no trades found — return original snapshot
 		status := "stale"
