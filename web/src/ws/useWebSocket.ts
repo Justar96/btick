@@ -12,25 +12,42 @@ interface UseWebSocketOptions {
 }
 
 export function useWebSocket({ url, onMessage, onStatusChange, onReconnect }: UseWebSocketOptions) {
-  const wsRef = useRef<WebSocket | null>(null!);
+  const wsRef = useRef<WebSocket | null>(null);
   const attemptRef = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined!);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const onMessageRef = useRef(onMessage);
   const onStatusRef = useRef(onStatusChange);
   const onReconnectRef = useRef(onReconnect);
   const wasConnectedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const urlRef = useRef(url);
 
   onMessageRef.current = onMessage;
   onStatusRef.current = onStatusChange;
   onReconnectRef.current = onReconnect;
+  urlRef.current = url;
 
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (!mountedRef.current) return;
 
-    const ws = new WebSocket(url);
+    // Close any existing socket cleanly before opening a new one
+    const prev = wsRef.current;
+    if (prev) {
+      prev.onopen = null;
+      prev.onmessage = null;
+      prev.onclose = null;
+      prev.onerror = null;
+      if (prev.readyState === WebSocket.OPEN || prev.readyState === WebSocket.CONNECTING) {
+        prev.close();
+      }
+      wsRef.current = null;
+    }
+
+    const ws = new WebSocket(urlRef.current);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (!mountedRef.current) { ws.close(); return; }
       const isReconnect = wasConnectedRef.current;
       attemptRef.current = 0;
       wasConnectedRef.current = true;
@@ -58,6 +75,7 @@ export function useWebSocket({ url, onMessage, onStatusChange, onReconnect }: Us
 
     ws.onclose = () => {
       onStatusRef.current?.(false);
+      if (!mountedRef.current) return;
       const delay = Math.min(RECONNECT_BASE * 2 ** attemptRef.current, RECONNECT_MAX);
       attemptRef.current++;
       timerRef.current = setTimeout(connect, delay);
@@ -66,13 +84,23 @@ export function useWebSocket({ url, onMessage, onStatusChange, onReconnect }: Us
     ws.onerror = () => {
       ws.close();
     };
-  }, [url]);
+  }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     connect();
     return () => {
+      mountedRef.current = false;
       clearTimeout(timerRef.current);
-      wsRef.current?.close();
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
+        wsRef.current = null;
+      }
     };
   }, [connect]);
 }

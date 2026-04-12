@@ -14,6 +14,14 @@ export interface WSMessage {
   source?: string;
   conn_state?: string;
   stale?: boolean;
+  source_details?: Array<{
+    source: string;
+    ref_price: string;
+    basis: string;
+    event_ts: string;
+    age_ms: number;
+  }>;
+  latency_ms?: number;
 }
 
 export interface WSClientAction {
@@ -37,6 +45,7 @@ export interface SourcePrice {
   source: string;
   price: string;
   ts: string;
+  latencyMs: number;
 }
 
 export interface SourceStatus {

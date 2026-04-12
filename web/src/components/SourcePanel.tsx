@@ -1,7 +1,5 @@
 import { useRef, useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { useSourcePrices, useSourceStatus } from "@/ws/context";
-import { feedHealthOptions } from "@/api/queries";
 import type { PriceState } from "@/ws/types";
 import styles from "./SourcePanel.module.css";
 
@@ -22,18 +20,6 @@ interface Props {
 export function SourcePanel({ price, symbol }: Props) {
   const sources = useSourcePrices(symbol);
   const statuses = useSourceStatus(symbol);
-  const { data: feeds } = useQuery(feedHealthOptions());
-
-  // Feed health per source (for latency only)
-  const lagMap = new Map<string, number>();
-  if (feeds) {
-    for (const f of feeds) {
-      const s = f.source ?? "";
-      if (s && f.median_lag_ms) {
-        lagMap.set(s, f.median_lag_ms);
-      }
-    }
-  }
 
   const medianPrice = price ? parseFloat(price.price) : 0;
 
@@ -73,6 +59,7 @@ export function SourcePanel({ price, symbol }: Props) {
           const sp = sources[name];
           const p = sp ? parseFloat(sp.price) : null;
           const delta = p !== null && medianPrice ? p - medianPrice : null;
+          const lag = sp?.latencyMs || undefined;
           const status = statuses[name];
           const connected = status ? status.connState === "connected" : false;
           const stale = status?.stale ?? false;
@@ -83,7 +70,7 @@ export function SourcePanel({ price, symbol }: Props) {
               meta={meta}
               price={p}
               delta={delta}
-              lag={lagMap.get(name)}
+              lag={lag}
               connected={connected}
               stale={stale}
             />

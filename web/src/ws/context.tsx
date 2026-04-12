@@ -3,44 +3,40 @@ import {
   useContext,
   useState,
   useCallback,
+  useMemo,
   type ReactNode,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useWebSocket } from "./useWebSocket";
 import type { WSMessage, PriceState, SourcePrice, SourceStatus } from "./types";
 
-interface WSContextValue {
-  prices: Record<string, PriceState>;
-  connected: boolean;
+// --- Separate contexts to prevent cross-talk re-renders ---
+
+const PriceContext = createContext<Record<string, PriceState>>({});
+const SourceContext = createContext<{
   sourcePrices: Record<string, Record<string, SourcePrice>>;
   sourceStatus: Record<string, Record<string, SourceStatus>>;
-}
-
-const WSContext = createContext<WSContextValue>({
-  prices: {},
-  connected: false,
-  sourcePrices: {},
-  sourceStatus: {},
-});
+}>({ sourcePrices: {}, sourceStatus: {} });
+const ConnectionContext = createContext(false);
 
 export function usePrice(symbol: string): PriceState | undefined {
-  return useContext(WSContext).prices[symbol];
+  return useContext(PriceContext)[symbol];
 }
 
 export function useWSConnected(): boolean {
-  return useContext(WSContext).connected;
+  return useContext(ConnectionContext);
 }
 
 export function useSourcePrices(
   symbol: string,
 ): Record<string, SourcePrice> {
-  return useContext(WSContext).sourcePrices[symbol] ?? {};
+  return useContext(SourceContext).sourcePrices[symbol] ?? {};
 }
 
 export function useSourceStatus(
   symbol: string,
 ): Record<string, SourceStatus> {
-  return useContext(WSContext).sourceStatus[symbol] ?? {};
+  return useContext(SourceContext).sourceStatus[symbol] ?? {};
 }
 
 const MAX_LIVE_SNAPSHOTS = 3600;
@@ -86,6 +82,22 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
 
         setPrices((prev) => ({ ...prev, [msg.symbol!]: state }));
 
+        // Update source prices from source_details — perfectly aligned with canonical
+        if (msg.source_details && msg.source_details.length > 0) {
+          setSourcePrices((prev) => {
+            const updated: Record<string, SourcePrice> = { ...(prev[msg.symbol!] ?? {}) };
+            for (const d of msg.source_details!) {
+              updated[d.source] = {
+                source: d.source,
+                price: d.ref_price,
+                ts: d.event_ts,
+                latencyMs: d.age_ms,
+              };
+            }
+            return { ...prev, [msg.symbol!]: updated };
+          });
+        }
+
         // Bridge to TanStack Query cache
         queryClient.setQueryData(["price", "latest", msg.symbol], {
           symbol: msg.symbol,
@@ -128,6 +140,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               source: msg.source!,
               price: msg.price!,
               ts: msg.ts ?? "",
+              latencyMs: msg.latency_ms ?? 0,
             },
           },
         }));
@@ -152,7 +165,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   );
 
   const handleReconnect = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ["price", "snapshots"] });
+    // Only invalidate REST backfill queries, not the live WS cache.
+    queryClient.invalidateQueries({
+      predicate: (query) =>
+        query.queryKey[0] === "price" &&
+        query.queryKey[1] === "snapshots" &&
+        !query.queryKey.includes("live"),
+    });
   }, [queryClient]);
 
   useWebSocket({
@@ -162,9 +181,18 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     onReconnect: handleReconnect,
   });
 
+  const sourceValue = useMemo(
+    () => ({ sourcePrices, sourceStatus }),
+    [sourcePrices, sourceStatus],
+  );
+
   return (
-    <WSContext.Provider value={{ prices, connected, sourcePrices, sourceStatus }}>
-      {children}
-    </WSContext.Provider>
+    <ConnectionContext.Provider value={connected}>
+      <PriceContext.Provider value={prices}>
+        <SourceContext.Provider value={sourceValue}>
+          {children}
+        </SourceContext.Provider>
+      </PriceContext.Provider>
+    </ConnectionContext.Provider>
   );
 }

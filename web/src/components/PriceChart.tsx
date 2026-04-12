@@ -5,11 +5,31 @@ import type { LivelinePoint } from "liveline";
 import { snapshotsOptions } from "@/api/queries";
 import styles from "./PriceChart.module.css";
 
+// ─── Constants ───────────────────────────────────────────────────────
+
 const WINDOWS = [
   { label: "1m", secs: 60 },
   { label: "5m", secs: 300 },
   { label: "1h", secs: 3600 },
 ];
+
+const MAX_WINDOW_SECS = 3600;
+
+const formatPrice = (v: number) =>
+  v.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+// ─── Helpers ─────────────────────────────────────────────────────────
+
+/** Parse ISO timestamp → epoch seconds. Returns 0 on failure. */
+function toEpoch(iso: string): number {
+  const ms = Date.parse(iso);
+  return ms > 0 ? ms / 1000 : 0;
+}
+
+// ─── Component ───────────────────────────────────────────────────────
 
 interface Props {
   symbol: string;
@@ -23,17 +43,13 @@ interface SnapshotRow {
 export function PriceChart({ symbol }: Props) {
   const [windowSecs, setWindowSecs] = useState(300);
 
-  // Compute time range for backfill query
-  const start = useMemo(() => {
-    const d = new Date(Date.now() - windowSecs * 1000);
-    return d.toISOString();
-  }, [windowSecs]);
+  // ── Data sources ──────────────────────────────────────────────────
+  const backfillStart = useMemo(
+    () => new Date(Date.now() - MAX_WINDOW_SECS * 1000).toISOString(),
+    [],
+  );
+  const { data: backfillData } = useQuery(snapshotsOptions(symbol, backfillStart));
 
-  // Backfill from REST via TanStack Query
-  const { data: backfillData } = useQuery(snapshotsOptions(start));
-
-  // Live snapshots from WS (appended by WebSocketProvider via setQueryData)
-  // useQuery subscribes to cache updates so the component re-renders on new points
   const { data: liveData } = useQuery<SnapshotRow[]>({
     queryKey: ["price", "snapshots", "live", symbol],
     queryFn: () => [],
@@ -42,130 +58,72 @@ export function PriceChart({ symbol }: Props) {
     refetchOnWindowFocus: false,
   });
 
-  // Merge backfill + live, deduplicate by rounded timestamp
-  const merged = useMemo(() => {
-    const backfillPoints: LivelinePoint[] = (backfillData ?? []).flatMap(
-      (r) => {
-        if (!r.ts_second || !r.price) return [];
-        return [
-          {
-            time: new Date(r.ts_second).getTime() / 1000,
-            value: parseFloat(r.price),
-          },
-        ];
-      },
-    );
+  // ── Merge into Liveline points ────────────────────────────────────
+  //
+  // Liveline drawing (from source):
+  //   - Historical points: rendered at their exact p.value
+  //   - LAST visible point: rendered at smoothValue (lerps → value prop)
+  //   - Live tip at Date.now()/1000: also at smoothValue
+  //
+  // If `value` ≠ last data point's value, the last point jumps away
+  // from its actual position → line "doesn't follow points".
+  //
+  // Fix: value = last data point's value. This keeps the line perfectly
+  // through all points. Liveline smoothly lerps between each new
+  // 1-second snapshot arrival.
+  const data: LivelinePoint[] = useMemo(() => {
+    const bySecond = new Map<number, LivelinePoint>();
 
-    const livePoints: LivelinePoint[] = (liveData ?? []).map(
-      (r: SnapshotRow) => ({
-        time: new Date(r.ts_second).getTime() / 1000,
-        value: parseFloat(r.price),
-      }),
-    );
-
-    const seen = new Set<number>();
-    const result: LivelinePoint[] = [];
-    for (const pt of [...backfillPoints, ...livePoints]) {
-      const key = Math.round(pt.time);
-      if (!seen.has(key)) {
-        seen.add(key);
-        result.push(pt);
-      }
+    for (const r of backfillData ?? []) {
+      if (!r.ts_second || !r.price) continue;
+      const t = toEpoch(r.ts_second);
+      if (t === 0) continue;
+      bySecond.set(Math.floor(t), { time: t, value: parseFloat(r.price) });
     }
-    result.sort((a, b) => a.time - b.time);
-    return result;
+
+    for (const r of liveData ?? []) {
+      const t = toEpoch(r.ts_second);
+      if (t === 0) continue;
+      bySecond.set(Math.floor(t), { time: t, value: parseFloat(r.price) });
+    }
+
+    if (bySecond.size === 0) return [];
+
+    const pts = Array.from(bySecond.values());
+    pts.sort((a, b) => a.time - b.time);
+    return pts;
   }, [backfillData, liveData]);
 
-  const latest = merged.length > 0 ? merged[merged.length - 1].value : 0;
-
-  // Compute range stats from visible data
-  const range = useMemo(() => {
-    if (merged.length === 0) return null;
-    const now = Date.now() / 1000;
-    const cutoff = now - windowSecs;
-    const visible = merged.filter((p) => p.time >= cutoff);
-    if (visible.length === 0) return null;
-
-    let high = -Infinity;
-    let low = Infinity;
-    const open = visible[0].value;
-    const close = visible[visible.length - 1].value;
-
-    for (const p of visible) {
-      if (p.value > high) high = p.value;
-      if (p.value < low) low = p.value;
-    }
-
-    const change = close - open;
-    const changePct = open !== 0 ? (change / open) * 100 : 0;
-
-    return { high, low, open, close, change, changePct };
-  }, [merged, windowSecs]);
+  // value must match the last data point so the line passes through it.
+  const value = data.length > 0 ? data[data.length - 1].value : 0;
+  const hasData = data.length >= 2;
 
   const handleWindowChange = useCallback((secs: number) => {
     setWindowSecs(secs);
   }, []);
 
-  const fmt = (v: number) =>
-    v.toLocaleString("en-US", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-
+  // ── Render ────────────────────────────────────────────────────────
   return (
-    <div id="chart" className={styles.wrap}>
-      {merged.length > 0 ? (
-        <>
-          <Liveline
-            data={merged}
-            value={latest}
-            window={windowSecs}
-            windows={WINDOWS}
-            windowStyle="rounded"
-            onWindowChange={handleWindowChange}
-            fill
-            grid
-            badge
-            momentum
-            showValue
-            formatValue={fmt}
-            style={{ height: 220 }}
-          />
-          {range && (
-            <div className={styles.range}>
-              <div className={styles.rangeStat}>
-                <span className={styles.rangeLabel}>H</span>
-                <span className={styles.rangeValue}>{fmt(range.high)}</span>
-              </div>
-              <div className={styles.rangeStat}>
-                <span className={styles.rangeLabel}>L</span>
-                <span className={styles.rangeValue}>{fmt(range.low)}</span>
-              </div>
-              <div className={styles.rangeStat}>
-                <span className={styles.rangeLabel}>O</span>
-                <span className={styles.rangeValue}>{fmt(range.open)}</span>
-              </div>
-              <div className={styles.rangeStat}>
-                <span className={styles.rangeLabel}>C</span>
-                <span className={styles.rangeValue}>{fmt(range.close)}</span>
-              </div>
-              <div className={styles.rangeStat}>
-                <span className={styles.rangeLabel}>Chg</span>
-                <span
-                  className={`${styles.rangeValue} ${range.change >= 0 ? styles.rangeUp : styles.rangeDown}`}
-                >
-                  {range.change >= 0 ? "+" : ""}{fmt(range.change)}
-                  <span className={styles.rangePct}>
-                    {" "}({range.changePct >= 0 ? "+" : ""}{range.changePct.toFixed(2)}%)
-                  </span>
-                </span>
-              </div>
-            </div>
-          )}
-        </>
-      ) : (
-        <div className={styles.empty}>Waiting for data...</div>
-      )}
+    <div className={styles.wrap}>
+      <div className={styles.chart}>
+        <Liveline
+          data={data}
+          value={value}
+          loading={!hasData}
+          window={windowSecs}
+          windows={WINDOWS}
+          windowStyle="rounded"
+          onWindowChange={handleWindowChange}
+          theme="light"
+          badge={false}
+          badgeTail={false}
+          fill
+          grid
+          scrub
+          momentum
+          formatValue={formatPrice}
+        />
+      </div>
     </div>
   );
 }
