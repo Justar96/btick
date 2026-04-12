@@ -158,7 +158,7 @@ func (h *WSHub) sendHandshake(conn *websocket.Conn, msg WSMessage) bool {
 }
 
 func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
-	// Check connection limit before upgrading.
+	// Early check before upgrading (avoids wasting an upgrade on a full hub).
 	h.mu.RLock()
 	currentCount := len(h.clients)
 	h.mu.RUnlock()
@@ -184,7 +184,15 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		connectedAt: time.Now().UTC(),
 	}
 
+	// Atomically check limit and add under the same lock to prevent overcount.
 	h.mu.Lock()
+	if len(h.clients) >= h.wsCfg.MaxClientCount() {
+		h.mu.Unlock()
+		h.logger.Warn("ws connection rejected: max clients reached (post-upgrade)", "max", h.wsCfg.MaxClientCount())
+		metrics.IncWSRejected()
+		_ = conn.Close()
+		return
+	}
 	h.clients[client] = struct{}{}
 	clientCount := len(h.clients)
 	h.mu.Unlock()

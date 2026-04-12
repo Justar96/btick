@@ -826,7 +826,10 @@ func TestWSHub_HighFrequencyBroadcast(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	hub := testHub()
+	// Use a high drop limit to prevent slow-client eviction during the stress test.
+	hub := NewWSHub(testLogger(), config.WSConfig{
+		SlowClientMaxDrops: 100000,
+	}, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD"})
 
 	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
 	defer server.Close()
