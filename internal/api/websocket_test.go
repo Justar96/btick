@@ -581,6 +581,51 @@ func TestWSHub_Resubscribe(t *testing.T) {
 	}
 }
 
+func TestWSHub_SubscribeSymbols(t *testing.T) {
+	hub := NewWSHub(testLogger(), config.WSConfig{}, func(_ string) *domain.LatestState { return nil }, []string{"BTC/USD", "ETH/USD"})
+
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[4:]
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial error: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	drainMessages(t, conn, 2)
+
+	subMsg, _ := json.Marshal(clientAction{
+		Action:  "subscribe",
+		Symbols: []string{"ETH/USD"},
+	})
+	mustWriteMessage(t, conn, websocket.TextMessage, subMsg)
+	time.Sleep(50 * time.Millisecond)
+
+	hub.Broadcast(WSMessage{Type: "latest_price", Symbol: "BTC/USD", Price: "84100.00"})
+	hub.Broadcast(WSMessage{Type: "latest_price", Symbol: "ETH/USD", Price: "3100.00"})
+
+	mustSetReadDeadline(t, conn, time.Second)
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read error: %v", err)
+	}
+
+	var wsMsg WSMessage
+	mustUnmarshalWS(t, msg, &wsMsg)
+	if wsMsg.Symbol != "ETH/USD" {
+		t.Fatalf("expected ETH/USD update, got %q", wsMsg.Symbol)
+	}
+
+	mustSetReadDeadline(t, conn, 200*time.Millisecond)
+	_, _, err = conn.ReadMessage()
+	if err == nil {
+		t.Fatal("expected no additional message after symbol filtering")
+	}
+}
+
 // =============================================================================
 // Heartbeat Tests
 // =============================================================================
@@ -669,36 +714,98 @@ func TestWSHub_Heartbeat_Unsubscribe(t *testing.T) {
 	}
 }
 
+func TestServer_NextBroadcastBatch_CoalescesBurst(t *testing.T) {
+	eng := newMockEngine(nil)
+	s := testServer(nil, eng)
+
+	baseTS := time.Date(2026, 3, 19, 9, 10, 0, 0, time.UTC)
+	eng.tickCh <- domain.CanonicalTick{
+		CanonicalSymbol: "BTC/USD",
+		CanonicalPrice:  decimal.NewFromInt(84_100),
+		TSEvent:         baseTS,
+	}
+	eng.tickCh <- domain.CanonicalTick{
+		CanonicalSymbol: "BTC/USD",
+		CanonicalPrice:  decimal.NewFromInt(84_200),
+		TSEvent:         baseTS.Add(10 * time.Millisecond),
+	}
+	eng.snapshotCh <- domain.Snapshot1s{
+		CanonicalSymbol: "BTC/USD",
+		CanonicalPrice:  decimal.NewFromInt(84_150),
+		TSSecond:        baseTS,
+	}
+	eng.snapshotCh <- domain.Snapshot1s{
+		CanonicalSymbol: "BTC/USD",
+		CanonicalPrice:  decimal.NewFromInt(84_250),
+		TSSecond:        baseTS.Add(time.Second),
+	}
+	eng.sourcePriceCh <- domain.SourcePriceEvent{
+		Symbol: "BTC/USD",
+		Source: "binance",
+		Price:  decimal.NewFromInt(84_175),
+		TS:     baseTS,
+	}
+	eng.sourcePriceCh <- domain.SourcePriceEvent{
+		Symbol: "BTC/USD",
+		Source: "binance",
+		Price:  decimal.NewFromInt(84_275),
+		TS:     baseTS.Add(20 * time.Millisecond),
+	}
+
+	batch, _, _, _, ok := s.nextBroadcastBatch(context.Background(), eng.snapshotCh, eng.tickCh, eng.sourcePriceCh)
+	if !ok {
+		t.Fatal("expected a coalesced batch")
+	}
+	if len(batch) != 3 {
+		t.Fatalf("expected 3 coalesced messages, got %d", len(batch))
+	}
+
+	byType := make(map[string]WSMessage, len(batch))
+	for _, msg := range batch {
+		byType[msg.Type] = msg
+	}
+
+	if msg := byType["latest_price"]; msg.Price != "84200" {
+		t.Fatalf("unexpected latest_price batch entry: %#v", msg)
+	}
+	if msg := byType["snapshot_1s"]; msg.Price != "84250" {
+		t.Fatalf("unexpected snapshot batch entry: %#v", msg)
+	}
+	if msg := byType["source_price"]; msg.Price != "84275" {
+		t.Fatalf("unexpected source_price batch entry: %#v", msg)
+	}
+}
+
 // =============================================================================
 // Subscription set() coverage
 // =============================================================================
 
 func TestSubscriptions_SetHeartbeat(t *testing.T) {
 	subs := newSubscriptions()
-	if !subs.wants("heartbeat") {
+	if !subs.wants("heartbeat", "") {
 		t.Fatal("heartbeat should be on by default")
 	}
 	subs.set("heartbeat", false)
-	if subs.wants("heartbeat") {
+	if subs.wants("heartbeat", "") {
 		t.Fatal("heartbeat should be off after set(false)")
 	}
 	subs.set("heartbeat", true)
-	if !subs.wants("heartbeat") {
+	if !subs.wants("heartbeat", "") {
 		t.Fatal("heartbeat should be on after set(true)")
 	}
 }
 
 func TestSubscriptions_SetLatestPrice(t *testing.T) {
 	subs := newSubscriptions()
-	if !subs.wants("latest_price") {
+	if !subs.wants("latest_price", "") {
 		t.Fatal("latest_price should be on by default")
 	}
 	subs.set("latest_price", false)
-	if subs.wants("latest_price") {
+	if subs.wants("latest_price", "") {
 		t.Fatal("latest_price should be off after set(false)")
 	}
 	subs.set("latest_price", true)
-	if !subs.wants("latest_price") {
+	if !subs.wants("latest_price", "") {
 		t.Fatal("latest_price should be on after set(true)")
 	}
 }
@@ -708,7 +815,7 @@ func TestSubscriptions_UnknownType(t *testing.T) {
 	// set with unknown type is a no-op
 	subs.set("unknown_type", false)
 	// wants unknown type always returns true
-	if !subs.wants("unknown_type") {
+	if !subs.wants("unknown_type", "") {
 		t.Error("unknown type should always pass wants()")
 	}
 }

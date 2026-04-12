@@ -6,14 +6,14 @@ import (
 
 func TestSubscriptions_SourcePriceDefaultOff(t *testing.T) {
 	subs := newSubscriptions()
-	if subs.wants("source_price") {
+	if subs.wants("source_price", "") {
 		t.Error("source_price should be off by default")
 	}
 }
 
 func TestSubscriptions_SourceStatusDefaultOff(t *testing.T) {
 	subs := newSubscriptions()
-	if subs.wants("source_status") {
+	if subs.wants("source_status", "") {
 		t.Error("source_status should be off by default")
 	}
 }
@@ -21,7 +21,7 @@ func TestSubscriptions_SourceStatusDefaultOff(t *testing.T) {
 func TestSubscriptions_SubscribeSourcePrice(t *testing.T) {
 	subs := newSubscriptions()
 	subs.set("source_price", true)
-	if !subs.wants("source_price") {
+	if !subs.wants("source_price", "") {
 		t.Error("source_price should be on after subscribe")
 	}
 }
@@ -29,7 +29,7 @@ func TestSubscriptions_SubscribeSourcePrice(t *testing.T) {
 func TestSubscriptions_SubscribeSourceStatus(t *testing.T) {
 	subs := newSubscriptions()
 	subs.set("source_status", true)
-	if !subs.wants("source_status") {
+	if !subs.wants("source_status", "") {
 		t.Error("source_status should be on after subscribe")
 	}
 }

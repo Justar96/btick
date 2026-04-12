@@ -56,27 +56,26 @@ func (m *mockStore) QueryFeedHealth(_ context.Context) ([]domain.FeedHealth, err
 }
 
 type mockEngine struct {
-	latestState *domain.LatestState
-	snapshotCh  chan domain.Snapshot1s
-	tickCh      chan domain.CanonicalTick
+	latestState   *domain.LatestState
+	snapshotCh    chan domain.Snapshot1s
+	tickCh        chan domain.CanonicalTick
+	sourcePriceCh chan domain.SourcePriceEvent
 }
 
 func newMockEngine(state *domain.LatestState) *mockEngine {
 	return &mockEngine{
-		latestState: state,
-		snapshotCh:  make(chan domain.Snapshot1s, 10),
-		tickCh:      make(chan domain.CanonicalTick, 10),
+		latestState:   state,
+		snapshotCh:    make(chan domain.Snapshot1s, 10),
+		tickCh:        make(chan domain.CanonicalTick, 10),
+		sourcePriceCh: make(chan domain.SourcePriceEvent, 10),
 	}
 }
 
 func (m *mockEngine) LatestState(_ string) *domain.LatestState { return m.latestState }
 func (m *mockEngine) Symbols() []string                        { return []string{"BTC/USD"} }
-func (m *mockEngine) SnapshotCh() <-chan domain.Snapshot1s {
-	return m.snapshotCh
-}
-func (m *mockEngine) TickCh() <-chan domain.CanonicalTick {
-	return m.tickCh
-}
+func (m *mockEngine) SnapshotCh() <-chan domain.Snapshot1s     { return m.snapshotCh }
+func (m *mockEngine) TickCh() <-chan domain.CanonicalTick      { return m.tickCh }
+func (m *mockEngine) SourcePriceCh() <-chan domain.SourcePriceEvent { return m.sourcePriceCh }
 
 // testServer creates a Server with the given mocks.
 func testServer(store Store, eng Engine) *Server {
@@ -456,6 +455,11 @@ func TestHandleHealth_NoData(t *testing.T) {
 	if resp["status"] != "no_data" {
 		t.Errorf("expected status no_data, got %v", resp["status"])
 	}
+	deps := resp["dependencies"].(map[string]interface{})
+	database := deps["database"].(map[string]interface{})
+	if database["ready"] != false {
+		t.Errorf("expected database.ready false, got %v", database["ready"])
+	}
 	if _, ok := resp["latest_price"]; ok {
 		t.Error("should not have latest_price when no data")
 	}
@@ -463,7 +467,7 @@ func TestHandleHealth_NoData(t *testing.T) {
 
 func TestHandleHealth_OK(t *testing.T) {
 	state := sampleLatestState()
-	s := testServer(nil, newMockEngine(state))
+	s := testServer(&mockStore{}, newMockEngine(state))
 	rr := httptest.NewRecorder()
 	s.handleHealth(rr, httptest.NewRequest("GET", "/v1/health", nil))
 
@@ -474,6 +478,11 @@ func TestHandleHealth_OK(t *testing.T) {
 	}
 	if resp["latest_price"] != "84150" {
 		t.Errorf("expected latest_price 84150, got %v", resp["latest_price"])
+	}
+	deps := resp["dependencies"].(map[string]interface{})
+	database := deps["database"].(map[string]interface{})
+	if database["ready"] != true {
+		t.Errorf("expected database.ready true, got %v", database["ready"])
 	}
 }
 
@@ -894,6 +903,27 @@ func TestBroadcastLoop_TickBroadcast(t *testing.T) {
 	}
 	eng.tickCh <- tick
 
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+}
+
+func TestBroadcastLoop_SourcePriceBroadcast(t *testing.T) {
+	eng := newMockEngine(nil)
+	s := testServer(nil, eng)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go s.broadcastLoop(ctx)
+
+	eng.sourcePriceCh <- domain.SourcePriceEvent{
+		Symbol: "BTC/USD",
+		Source: "binance",
+		Price:  decimal.NewFromInt(84150),
+		TS:     refTime,
+	}
+
+	// Give the broadcastLoop time to process
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 }

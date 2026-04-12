@@ -12,25 +12,27 @@ type MultiEngine struct {
 	engines map[string]*SnapshotEngine // keyed by canonical symbol
 	symbols []string                   // ordered list of symbols
 
-	snapshotCh chan domain.Snapshot1s
-	tickCh     chan domain.CanonicalTick
+	snapshotCh    chan domain.Snapshot1s
+	tickCh        chan domain.CanonicalTick
+	sourcePriceCh chan domain.SourcePriceEvent
 }
 
 // NewMultiEngine creates a MultiEngine from a set of per-symbol engines.
 // It merges their snapshot and tick channels into single output channels.
 func NewMultiEngine(engines map[string]*SnapshotEngine, symbols []string) *MultiEngine {
 	m := &MultiEngine{
-		engines:    engines,
-		symbols:    symbols,
-		snapshotCh: make(chan domain.Snapshot1s, 100*len(engines)),
-		tickCh:     make(chan domain.CanonicalTick, 1000*len(engines)),
+		engines:       engines,
+		symbols:       symbols,
+		snapshotCh:    make(chan domain.Snapshot1s, 100*len(engines)),
+		tickCh:        make(chan domain.CanonicalTick, 1000*len(engines)),
+		sourcePriceCh: make(chan domain.SourcePriceEvent, 100*len(engines)),
 	}
 
 	// Merge per-engine channels into the combined output channels.
 	var wg sync.WaitGroup
 	for _, eng := range engines {
 		e := eng
-		wg.Add(2)
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
 			for snap := range e.SnapshotCh() {
@@ -43,6 +45,12 @@ func NewMultiEngine(engines map[string]*SnapshotEngine, symbols []string) *Multi
 				m.tickCh <- tick
 			}
 		}()
+		go func() {
+			defer wg.Done()
+			for sp := range e.SourcePriceCh() {
+				m.sourcePriceCh <- sp
+			}
+		}()
 	}
 
 	// Close merged channels once all sources are done.
@@ -50,6 +58,7 @@ func NewMultiEngine(engines map[string]*SnapshotEngine, symbols []string) *Multi
 		wg.Wait()
 		close(m.snapshotCh)
 		close(m.tickCh)
+		close(m.sourcePriceCh)
 	}()
 
 	return m
@@ -77,4 +86,9 @@ func (m *MultiEngine) SnapshotCh() <-chan domain.Snapshot1s {
 // TickCh returns the merged tick channel for all symbols.
 func (m *MultiEngine) TickCh() <-chan domain.CanonicalTick {
 	return m.tickCh
+}
+
+// SourcePriceCh returns the merged source price channel for all symbols.
+func (m *MultiEngine) SourcePriceCh() <-chan domain.SourcePriceEvent {
+	return m.sourcePriceCh
 }

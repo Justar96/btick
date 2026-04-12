@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/justar9/btick/internal/config"
@@ -28,6 +30,7 @@ type Engine interface {
 	Symbols() []string
 	SnapshotCh() <-chan domain.Snapshot1s
 	TickCh() <-chan domain.CanonicalTick
+	SourcePriceCh() <-chan domain.SourcePriceEvent
 }
 
 // Server is the HTTP/WS API server.
@@ -35,6 +38,7 @@ type Server struct {
 	httpAddr            string
 	wsPath              string
 	db                  Store
+	dbMu                sync.RWMutex
 	engine              Engine
 	wsHub               *WSHub
 	logger              *slog.Logger
@@ -42,6 +46,13 @@ type Server struct {
 	nowFunc             func() time.Time // injectable for testing; defaults to time.Now
 	settlementWindow    time.Duration    // re-aggregation window for degraded/stale settlements
 	minHealthySources   int              // threshold for confirmed vs degraded
+}
+
+const maxWSBroadcastDrain = 256
+
+type orderedWSMessage struct {
+	msg   WSMessage
+	order int
 }
 
 func (s *Server) now() time.Time {
@@ -81,6 +92,22 @@ func normalizeStore(db Store) Store {
 	return db
 }
 
+func (s *Server) store() Store {
+	s.dbMu.RLock()
+	defer s.dbMu.RUnlock()
+	return s.db
+}
+
+func (s *Server) hasStore() bool {
+	return s.store() != nil
+}
+
+func (s *Server) SetStore(db Store) {
+	s.dbMu.Lock()
+	defer s.dbMu.Unlock()
+	s.db = normalizeStore(db)
+}
+
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -92,6 +119,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/health/feeds", s.handleFeedHealth)
 	mux.HandleFunc("GET /v1/price/settlement", s.handleSettlement)
+	mux.HandleFunc("GET /v1/symbols", s.handleSymbols)
 	mux.Handle("GET /metrics", metrics.Handler())
 
 	// WebSocket
@@ -138,41 +166,175 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) broadcastLoop(ctx context.Context) {
+	snapshotCh := s.engine.SnapshotCh()
+	tickCh := s.engine.TickCh()
+	sourcePriceCh := s.engine.SourcePriceCh()
+
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case snap, ok := <-s.engine.SnapshotCh():
-			if !ok {
+		batch, nextSnapshotCh, nextTickCh, nextSourcePriceCh, ok := s.nextBroadcastBatch(ctx, snapshotCh, tickCh, sourcePriceCh)
+		snapshotCh = nextSnapshotCh
+		tickCh = nextTickCh
+		sourcePriceCh = nextSourcePriceCh
+
+		if !ok {
+			if ctx.Err() != nil || snapshotCh == nil {
 				return
 			}
-			s.wsHub.Broadcast(WSMessage{
-				Type:         "snapshot_1s",
-				Symbol:       snap.CanonicalSymbol,
-				TS:           snap.TSSecond.Format(time.RFC3339Nano),
-				Price:        snap.CanonicalPrice.String(),
-				Basis:        snap.Basis,
-				IsStale:      snap.IsStale,
-				QualityScore: snap.QualityScore.String(),
-				SourceCount:  snap.SourceCount,
-				SourcesUsed:  snap.SourcesUsed,
-			})
-		case tick, ok := <-s.engine.TickCh():
-			if !ok {
-				return
-			}
-			s.wsHub.Broadcast(WSMessage{
-				Type:         "latest_price",
-				Symbol:       tick.CanonicalSymbol,
-				TS:           tick.TSEvent.Format(time.RFC3339Nano),
-				Price:        tick.CanonicalPrice.String(),
-				Basis:        tick.Basis,
-				IsStale:      tick.IsStale,
-				QualityScore: tick.QualityScore.String(),
-				SourceCount:  tick.SourceCount,
-				SourcesUsed:  tick.SourcesUsed,
-			})
+			continue
 		}
+
+		for _, msg := range batch {
+			s.wsHub.Broadcast(msg)
+		}
+	}
+}
+
+func (s *Server) nextBroadcastBatch(
+	ctx context.Context,
+	snapshotCh <-chan domain.Snapshot1s,
+	tickCh <-chan domain.CanonicalTick,
+	sourcePriceCh <-chan domain.SourcePriceEvent,
+) ([]WSMessage, <-chan domain.Snapshot1s, <-chan domain.CanonicalTick, <-chan domain.SourcePriceEvent, bool) {
+	pending := make(map[string]orderedWSMessage, maxWSBroadcastDrain)
+	order := 0
+
+	record := func(msg WSMessage) {
+		key := msg.Type + "\x00" + msg.Symbol + "\x00" + msg.Source
+		pending[key] = orderedWSMessage{msg: msg, order: order}
+		order++
+	}
+
+	for len(pending) == 0 {
+		msg, nextSnapshotCh, nextTickCh, nextSourcePriceCh, ok := s.nextBroadcastMessage(ctx, snapshotCh, tickCh, sourcePriceCh, true)
+		snapshotCh = nextSnapshotCh
+		tickCh = nextTickCh
+		sourcePriceCh = nextSourcePriceCh
+		if !ok {
+			return nil, snapshotCh, tickCh, sourcePriceCh, false
+		}
+		record(msg)
+	}
+
+	for drained := 1; drained < maxWSBroadcastDrain; drained++ {
+		msg, nextSnapshotCh, nextTickCh, nextSourcePriceCh, ok := s.nextBroadcastMessage(ctx, snapshotCh, tickCh, sourcePriceCh, false)
+		snapshotCh = nextSnapshotCh
+		tickCh = nextTickCh
+		sourcePriceCh = nextSourcePriceCh
+		if !ok {
+			break
+		}
+		record(msg)
+	}
+
+	ordered := make([]orderedWSMessage, 0, len(pending))
+	for _, entry := range pending {
+		ordered = append(ordered, entry)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].order < ordered[j].order
+	})
+
+	batch := make([]WSMessage, 0, len(ordered))
+	for _, entry := range ordered {
+		batch = append(batch, entry.msg)
+	}
+
+	return batch, snapshotCh, tickCh, sourcePriceCh, true
+}
+
+func (s *Server) nextBroadcastMessage(
+	ctx context.Context,
+	snapshotCh <-chan domain.Snapshot1s,
+	tickCh <-chan domain.CanonicalTick,
+	sourcePriceCh <-chan domain.SourcePriceEvent,
+	block bool,
+) (WSMessage, <-chan domain.Snapshot1s, <-chan domain.CanonicalTick, <-chan domain.SourcePriceEvent, bool) {
+	for {
+		if snapshotCh == nil && tickCh == nil && sourcePriceCh == nil {
+			return WSMessage{}, nil, nil, nil, false
+		}
+
+		if block {
+			select {
+			case <-ctx.Done():
+				return WSMessage{}, snapshotCh, tickCh, sourcePriceCh, false
+			case snap, ok := <-snapshotCh:
+				if !ok {
+					return WSMessage{}, nil, nil, nil, false
+				}
+				return snapshotToWSMessage(snap), snapshotCh, tickCh, sourcePriceCh, true
+			case tick, ok := <-tickCh:
+				if !ok {
+					return WSMessage{}, nil, nil, nil, false
+				}
+				return tickToWSMessage(tick), snapshotCh, tickCh, sourcePriceCh, true
+			case sp, ok := <-sourcePriceCh:
+				if !ok {
+					return WSMessage{}, nil, nil, nil, false
+				}
+				return sourcePriceToWSMessage(sp), snapshotCh, tickCh, sourcePriceCh, true
+			}
+		}
+
+		select {
+		case snap, ok := <-snapshotCh:
+			if !ok {
+				return WSMessage{}, nil, nil, nil, false
+			}
+			return snapshotToWSMessage(snap), snapshotCh, tickCh, sourcePriceCh, true
+		case tick, ok := <-tickCh:
+			if !ok {
+				return WSMessage{}, nil, nil, nil, false
+			}
+			return tickToWSMessage(tick), snapshotCh, tickCh, sourcePriceCh, true
+		case sp, ok := <-sourcePriceCh:
+			if !ok {
+				return WSMessage{}, nil, nil, nil, false
+			}
+			return sourcePriceToWSMessage(sp), snapshotCh, tickCh, sourcePriceCh, true
+		default:
+			return WSMessage{}, snapshotCh, tickCh, sourcePriceCh, false
+		}
+	}
+}
+
+func snapshotToWSMessage(snap domain.Snapshot1s) WSMessage {
+	return WSMessage{
+		Type:         "snapshot_1s",
+		Symbol:       snap.CanonicalSymbol,
+		TS:           snap.TSSecond.Format(time.RFC3339Nano),
+		Price:        snap.CanonicalPrice.String(),
+		Basis:        snap.Basis,
+		IsStale:      snap.IsStale,
+		IsDegraded:   snap.IsDegraded,
+		QualityScore: snap.QualityScore.String(),
+		SourceCount:  snap.SourceCount,
+		SourcesUsed:  snap.SourcesUsed,
+	}
+}
+
+func tickToWSMessage(tick domain.CanonicalTick) WSMessage {
+	return WSMessage{
+		Type:         "latest_price",
+		Symbol:       tick.CanonicalSymbol,
+		TS:           tick.TSEvent.Format(time.RFC3339Nano),
+		Price:        tick.CanonicalPrice.String(),
+		Basis:        tick.Basis,
+		IsStale:      tick.IsStale,
+		IsDegraded:   tick.IsDegraded,
+		QualityScore: tick.QualityScore.String(),
+		SourceCount:  tick.SourceCount,
+		SourcesUsed:  tick.SourcesUsed,
+	}
+}
+
+func sourcePriceToWSMessage(sp domain.SourcePriceEvent) WSMessage {
+	return WSMessage{
+		Type:   "source_price",
+		Symbol: sp.Symbol,
+		Source: sp.Source,
+		TS:     sp.TS.Format(time.RFC3339Nano),
+		Price:  sp.Price.String(),
 	}
 }
 
