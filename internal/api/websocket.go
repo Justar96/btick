@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,20 +18,23 @@ import (
 
 // WSMessage is a message broadcast to WebSocket clients.
 type WSMessage struct {
-	Type         string   `json:"type"`
-	Seq          uint64   `json:"seq,omitempty"`
-	Symbol       string   `json:"symbol,omitempty"`
-	TS           string   `json:"ts"`
-	Price        string   `json:"price,omitempty"`
-	Basis        string   `json:"basis,omitempty"`
-	IsStale      bool     `json:"is_stale,omitempty"`
-	QualityScore string   `json:"quality_score,omitempty"`
-	SourceCount  int      `json:"source_count,omitempty"`
-	SourcesUsed  []string `json:"sources_used,omitempty"`
-	Message      string   `json:"message,omitempty"`
-	Source       string   `json:"source,omitempty"`
-	ConnState    string   `json:"conn_state,omitempty"`
-	Stale        bool     `json:"stale,omitempty"`
+	Type          string          `json:"type"`
+	Seq           uint64          `json:"seq,omitempty"`
+	Symbol        string          `json:"symbol,omitempty"`
+	TS            string          `json:"ts"`
+	Price         string          `json:"price,omitempty"`
+	Basis         string          `json:"basis,omitempty"`
+	IsStale       bool            `json:"is_stale,omitempty"`
+	IsDegraded    bool            `json:"is_degraded,omitempty"`
+	QualityScore  string          `json:"quality_score,omitempty"`
+	SourceCount   int             `json:"source_count,omitempty"`
+	SourcesUsed   []string        `json:"sources_used,omitempty"`
+	Message       string          `json:"message,omitempty"`
+	Source        string          `json:"source,omitempty"`
+	ConnState     string          `json:"conn_state,omitempty"`
+	Stale         bool            `json:"stale,omitempty"`
+	SourceDetails json.RawMessage `json:"source_details,omitempty"`
+	LatencyMs     int64           `json:"latency_ms,omitempty"`
 }
 
 // subscriptions tracks which message types a client wants.
@@ -41,6 +45,43 @@ type subscriptions struct {
 	heartbeat    bool
 	sourcePrice  bool
 	sourceStatus bool
+	symbols      map[string]struct{}
+}
+
+func parseRequestedSymbols(values []string, allowedSymbols []string) ([]string, bool) {
+	if len(values) == 0 {
+		return nil, false
+	}
+
+	allowed := make(map[string]struct{}, len(allowedSymbols))
+	for _, symbol := range allowedSymbols {
+		normalized := normalizeSymbol(symbol)
+		if normalized == "" {
+			continue
+		}
+		allowed[normalized] = struct{}{}
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	selected := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			normalized := normalizeSymbol(part)
+			if normalized == "" {
+				continue
+			}
+			if _, ok := allowed[normalized]; !ok {
+				continue
+			}
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			selected = append(selected, normalized)
+		}
+	}
+
+	return selected, true
 }
 
 func newSubscriptions() *subscriptions {
@@ -51,23 +92,74 @@ func newSubscriptions() *subscriptions {
 	}
 }
 
-func (s *subscriptions) wants(msgType string) bool {
+func normalizeSymbol(symbol string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol))
+}
+
+func (s *subscriptions) wants(msgType string, symbol ...string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	allowedType := false
 	switch msgType {
 	case "snapshot_1s":
-		return s.snapshot1s
+		allowedType = s.snapshot1s
 	case "latest_price":
-		return s.latestPrice
+		allowedType = s.latestPrice
 	case "heartbeat":
-		return s.heartbeat
+		allowedType = s.heartbeat
 	case "source_price":
-		return s.sourcePrice
+		allowedType = s.sourcePrice
 	case "source_status":
-		return s.sourceStatus
+		allowedType = s.sourceStatus
 	default:
-		return true // welcome, unknown types always pass
+		allowedType = true // welcome, unknown types always pass
 	}
+
+	if !allowedType {
+		return false
+	}
+
+	selectedSymbol := ""
+	if len(symbol) > 0 {
+		selectedSymbol = symbol[0]
+	}
+
+	if selectedSymbol == "" || s.symbols == nil {
+		return true
+	}
+
+	_, ok := s.symbols[normalizeSymbol(selectedSymbol)]
+	return ok
+}
+
+func (s *subscriptions) effectiveSymbols(allSymbols []string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	selected := make([]string, 0, len(allSymbols))
+	if s.symbols == nil {
+		for _, symbol := range allSymbols {
+			normalized := normalizeSymbol(symbol)
+			if normalized == "" {
+				continue
+			}
+			selected = append(selected, normalized)
+		}
+		return selected
+	}
+
+	for _, symbol := range allSymbols {
+		normalized := normalizeSymbol(symbol)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := s.symbols[normalized]; ok {
+			selected = append(selected, normalized)
+		}
+	}
+
+	return selected
 }
 
 func (s *subscriptions) set(msgType string, val bool) {
@@ -87,10 +179,70 @@ func (s *subscriptions) set(msgType string, val bool) {
 	}
 }
 
+func (s *subscriptions) subscribeSymbols(symbols []string) {
+	if len(symbols) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.symbols == nil {
+		s.symbols = make(map[string]struct{}, len(symbols))
+	}
+
+	for _, symbol := range symbols {
+		normalized := normalizeSymbol(symbol)
+		if normalized == "" {
+			continue
+		}
+		s.symbols[normalized] = struct{}{}
+	}
+}
+
+func (s *subscriptions) setSymbols(symbols []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.symbols = make(map[string]struct{}, len(symbols))
+	for _, symbol := range symbols {
+		normalized := normalizeSymbol(symbol)
+		if normalized == "" {
+			continue
+		}
+		s.symbols[normalized] = struct{}{}
+	}
+}
+
+func (s *subscriptions) unsubscribeSymbols(symbols []string, allSymbols []string) {
+	if len(symbols) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.symbols == nil {
+		s.symbols = make(map[string]struct{}, len(allSymbols))
+		for _, symbol := range allSymbols {
+			normalized := normalizeSymbol(symbol)
+			if normalized == "" {
+				continue
+			}
+			s.symbols[normalized] = struct{}{}
+		}
+	}
+
+	for _, symbol := range symbols {
+		delete(s.symbols, normalizeSymbol(symbol))
+	}
+}
+
 // clientAction is a message sent from client to server.
 type clientAction struct {
-	Action string   `json:"action"`
-	Types  []string `json:"types"`
+	Action  string   `json:"action"`
+	Types   []string `json:"types"`
+	Symbols []string `json:"symbols,omitempty"`
 }
 
 // WSHub manages WebSocket client connections and broadcast.
@@ -106,12 +258,12 @@ type WSHub struct {
 }
 
 type wsClient struct {
-	conn       *websocket.Conn
-	sendCh     chan []byte
-	closeOnce  sync.Once
-	subs       *subscriptions
-	dropCount  atomic.Int64
-	logger     *slog.Logger
+	conn        *websocket.Conn
+	sendCh      chan []byte
+	closeOnce   sync.Once
+	subs        *subscriptions
+	dropCount   atomic.Int64
+	logger      *slog.Logger
 	connectedAt time.Time
 }
 
@@ -156,7 +308,22 @@ func (h *WSHub) shutdownClients() {
 	}
 	h.clients = make(map[*wsClient]struct{})
 	h.mu.Unlock()
-	metrics.SetWSClients(0)
+	h.refreshClientMetrics()
+}
+
+func (h *WSHub) refreshClientMetrics() {
+	h.mu.RLock()
+	clientCount := len(h.clients)
+	symbolSubscribers := make(map[string]int, len(h.symbols))
+	for client := range h.clients {
+		for _, symbol := range client.subs.effectiveSymbols(h.symbols) {
+			symbolSubscribers[symbol]++
+		}
+	}
+	h.mu.RUnlock()
+
+	metrics.SetWSClients(clientCount)
+	metrics.SetWSSymbolSubscribers(symbolSubscribers)
 }
 
 func (h *WSHub) sendHandshake(conn *websocket.Conn, msg WSMessage) bool {
@@ -171,6 +338,8 @@ func (h *WSHub) sendHandshake(conn *websocket.Conn, msg WSMessage) bool {
 }
 
 func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
+	requestedSymbols, hasRequestedSymbols := parseRequestedSymbols(r.URL.Query()["symbols"], h.symbols)
+
 	// Early check before upgrading (avoids wasting an upgrade on a full hub).
 	h.mu.RLock()
 	currentCount := len(h.clients)
@@ -196,6 +365,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		logger:      h.logger,
 		connectedAt: time.Now().UTC(),
 	}
+	if hasRequestedSymbols {
+		client.subs.setSymbols(requestedSymbols)
+	}
 
 	// Atomically check limit and add under the same lock to prevent overcount.
 	h.mu.Lock()
@@ -207,11 +379,10 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.clients[client] = struct{}{}
-	clientCount := len(h.clients)
 	h.mu.Unlock()
-	metrics.SetWSClients(clientCount)
+	h.refreshClientMetrics()
 
-	h.logger.Info("ws client connected", "total", clientCount)
+	h.logger.Info("ws client connected", "total", h.ClientCount())
 
 	// Send welcome message before starting goroutines (no concurrent writer yet).
 	welcome := WSMessage{
@@ -223,9 +394,8 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("ws handshake failed: welcome")
 		h.mu.Lock()
 		delete(h.clients, client)
-		clientCount = len(h.clients)
 		h.mu.Unlock()
-		metrics.SetWSClients(clientCount)
+		h.refreshClientMetrics()
 		_ = conn.Close()
 		return
 	}
@@ -234,6 +404,9 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	if h.getState != nil {
 		sentAny := false
 		for _, sym := range h.symbols {
+			if !client.subs.wants("latest_price", sym) {
+				continue
+			}
 			state := h.getState(sym)
 			if state == nil {
 				continue
@@ -246,6 +419,7 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				Price:        state.Price.String(),
 				Basis:        state.Basis,
 				IsStale:      state.IsStale,
+				IsDegraded:   state.IsDegraded,
 				QualityScore: state.QualityScore.String(),
 				SourceCount:  state.SourceCount,
 				SourcesUsed:  state.SourcesUsed,
@@ -255,9 +429,8 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				h.logger.Warn("ws handshake failed: initial_state", "symbol", sym)
 				h.mu.Lock()
 				delete(h.clients, client)
-				clientCount = len(h.clients)
 				h.mu.Unlock()
-				metrics.SetWSClients(clientCount)
+				h.refreshClientMetrics()
 				_ = conn.Close()
 				return
 			}
@@ -272,9 +445,8 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				h.logger.Warn("ws handshake failed: no_data_yet")
 				h.mu.Lock()
 				delete(h.clients, client)
-				clientCount = len(h.clients)
 				h.mu.Unlock()
-				metrics.SetWSClients(clientCount)
+				h.refreshClientMetrics()
 				_ = conn.Close()
 				return
 			}
@@ -288,9 +460,8 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				_ = conn.Close()
 				h.mu.Lock()
 				delete(h.clients, client)
-				clientCount := len(h.clients)
 				h.mu.Unlock()
-				metrics.SetWSClients(clientCount)
+				h.refreshClientMetrics()
 			})
 		}()
 
@@ -328,9 +499,8 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				_ = conn.Close()
 				h.mu.Lock()
 				delete(h.clients, client)
-				clientCount := len(h.clients)
 				h.mu.Unlock()
-				metrics.SetWSClients(clientCount)
+				h.refreshClientMetrics()
 			})
 		}()
 
@@ -356,11 +526,14 @@ func (h *WSHub) HandleWS(w http.ResponseWriter, r *http.Request) {
 				for _, t := range action.Types {
 					client.subs.set(t, true)
 				}
+				client.subs.subscribeSymbols(action.Symbols)
 			case "unsubscribe":
 				for _, t := range action.Types {
 					client.subs.set(t, false)
 				}
+				client.subs.unsubscribeSymbols(action.Symbols, h.symbols)
 			}
+			h.refreshClientMetrics()
 			// unknown actions silently ignored (forward-compatible)
 		}
 	}()
@@ -386,16 +559,20 @@ func (h *WSHub) Broadcast(msg WSMessage) {
 
 	h.mu.RLock()
 	var evict []*wsClient
+	delivered := 0
 	for c := range h.clients {
-		if !c.subs.wants(msg.Type) {
+		if !c.subs.wants(msg.Type, msg.Symbol) {
 			continue
 		}
 		select {
 		case c.sendCh <- data:
+			delivered++
 		default:
 			drops := c.dropCount.Add(1)
 			metrics.IncWSDrop()
+			metrics.AddWSDropDetail(msg.Type, msg.Symbol, 1)
 			if drops >= maxDrops {
+				metrics.AddWSEvictionDetail(msg.Type, msg.Symbol, 1)
 				evict = append(evict, c)
 			} else if drops%100 == 1 {
 				c.logger.Warn("ws client too slow, dropping message",
@@ -406,6 +583,8 @@ func (h *WSHub) Broadcast(msg WSMessage) {
 		}
 	}
 	h.mu.RUnlock()
+	metrics.AddWSFanout(msg.Type, delivered)
+	metrics.AddWSSymbolFanout(msg.Type, msg.Symbol, delivered)
 
 	metrics.ObserveWSBroadcastDuration(time.Since(broadcastStart))
 
@@ -433,9 +612,8 @@ func (h *WSHub) evictClients(clients []*wsClient) {
 		}
 		metrics.IncWSEvicted()
 	}
-	clientCount := len(h.clients)
 	h.mu.Unlock()
-	metrics.SetWSClients(clientCount)
+	h.refreshClientMetrics()
 }
 
 // ClientCount returns the current number of connected clients.

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/justar9/btick/internal/config"
 	"github.com/justar9/btick/internal/domain"
+	"github.com/justar9/btick/internal/metrics"
 	"github.com/shopspring/decimal"
 )
 
@@ -29,6 +31,12 @@ func testHub() *WSHub {
 
 func testHubWithState(state *domain.LatestState) *WSHub {
 	return NewWSHub(testLogger(), config.WSConfig{}, func(_ string) *domain.LatestState { return state }, []string{"BTC/USD"})
+}
+
+func testHubWithStates(states map[string]*domain.LatestState, symbols []string) *WSHub {
+	return NewWSHub(testLogger(), config.WSConfig{}, func(symbol string) *domain.LatestState {
+		return states[symbol]
+	}, symbols)
 }
 
 func mustSetReadDeadline(t *testing.T, conn *websocket.Conn, d time.Duration) {
@@ -50,6 +58,31 @@ func mustWriteMessage(t *testing.T, conn *websocket.Conn, msgType int, data []by
 	if err := conn.WriteMessage(msgType, data); err != nil {
 		t.Fatalf("write message: %v", err)
 	}
+}
+
+func readMetricsBody(t *testing.T) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("metrics status: %d", rr.Code)
+	}
+	return rr.Body.String()
+}
+
+func waitForMetricsBody(t *testing.T, predicate func(string) bool) string {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	var body string
+	for time.Now().Before(deadline) {
+		body = readMetricsBody(t)
+		if predicate(body) {
+			return body
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("metrics condition not met, last body: %s", body)
+	return ""
 }
 
 // =============================================================================
@@ -359,6 +392,163 @@ func TestWSHub_InitialState_NoData(t *testing.T) {
 	if wsMsg.Message != "no_data_yet" {
 		t.Errorf("expected message 'no_data_yet', got %q", wsMsg.Message)
 	}
+}
+
+func TestWSHub_InitialState_QuerySymbolFilter(t *testing.T) {
+	states := map[string]*domain.LatestState{
+		"BTC/USD": {
+			Symbol:       "BTC/USD",
+			TS:           time.Date(2026, 3, 19, 9, 10, 0, 0, time.UTC),
+			Price:        decimal.NewFromInt(84150),
+			Basis:        "median_trade",
+			QualityScore: decimal.NewFromFloat(0.95),
+			SourceCount:  3,
+		},
+		"ETH/USD": {
+			Symbol:       "ETH/USD",
+			TS:           time.Date(2026, 3, 19, 9, 10, 1, 0, time.UTC),
+			Price:        decimal.NewFromInt(3150),
+			Basis:        "median_trade",
+			QualityScore: decimal.NewFromFloat(0.91),
+			SourceCount:  2,
+		},
+	}
+	hub := testHubWithStates(states, []string{"BTC/USD", "ETH/USD"})
+
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[4:] + "?symbols=ETH%2FUSD"
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial error: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Welcome
+	mustSetReadDeadline(t, conn, time.Second)
+	_, _, err = conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read welcome: %v", err)
+	}
+
+	// Only ETH initial state should be sent
+	mustSetReadDeadline(t, conn, time.Second)
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial state: %v", err)
+	}
+
+	var wsMsg WSMessage
+	mustUnmarshalWS(t, msg, &wsMsg)
+	if wsMsg.Symbol != "ETH/USD" {
+		t.Fatalf("expected ETH/USD initial state, got %q", wsMsg.Symbol)
+	}
+	if wsMsg.Message != "initial_state" {
+		t.Fatalf("expected initial_state message, got %q", wsMsg.Message)
+	}
+
+	mustSetReadDeadline(t, conn, 200*time.Millisecond)
+	_, _, err = conn.ReadMessage()
+	if err == nil {
+		t.Fatal("expected no additional initial state for filtered-out symbols")
+	}
+}
+
+func TestWSHub_QuerySymbolFilter_AppliesToBroadcasts(t *testing.T) {
+	states := map[string]*domain.LatestState{
+		"ETH/USD": {
+			Symbol:       "ETH/USD",
+			TS:           time.Date(2026, 3, 19, 9, 10, 1, 0, time.UTC),
+			Price:        decimal.NewFromInt(3150),
+			Basis:        "median_trade",
+			QualityScore: decimal.NewFromFloat(0.91),
+			SourceCount:  2,
+		},
+	}
+	hub := testHubWithStates(states, []string{"BTC/USD", "ETH/USD"})
+
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[4:] + "?symbols=ETH%2FUSD"
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial error: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Drain welcome + filtered initial state.
+	drainMessages(t, conn, 2)
+
+	hub.Broadcast(WSMessage{Type: "latest_price", Symbol: "BTC/USD", Price: "84100.00"})
+	hub.Broadcast(WSMessage{Type: "latest_price", Symbol: "ETH/USD", Price: "3200.00"})
+
+	mustSetReadDeadline(t, conn, time.Second)
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read broadcast: %v", err)
+	}
+
+	var wsMsg WSMessage
+	mustUnmarshalWS(t, msg, &wsMsg)
+	if wsMsg.Symbol != "ETH/USD" {
+		t.Fatalf("expected ETH/USD broadcast, got %q", wsMsg.Symbol)
+	}
+	if wsMsg.Price != "3200.00" {
+		t.Fatalf("expected ETH price, got %q", wsMsg.Price)
+	}
+
+	mustSetReadDeadline(t, conn, 200*time.Millisecond)
+	_, _, err = conn.ReadMessage()
+	if err == nil {
+		t.Fatal("expected no BTC/USD broadcast for connect-time symbol filter")
+	}
+}
+
+func TestWSHub_SymbolSubscriberMetrics(t *testing.T) {
+	hub := NewWSHub(testLogger(), config.WSConfig{}, nil, []string{"BTC/USD", "ETH/USD"})
+
+	server := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
+	defer server.Close()
+
+	allConn, _, err := websocket.DefaultDialer.Dial("ws"+server.URL[4:], nil)
+	if err != nil {
+		t.Fatalf("dial default client: %v", err)
+	}
+	defer func() { _ = allConn.Close() }()
+	drainMessages(t, allConn, 1)
+
+	filteredConn, _, err := websocket.DefaultDialer.Dial("ws"+server.URL[4:]+"?symbols=ETH%2FUSD", nil)
+	if err != nil {
+		t.Fatalf("dial filtered client: %v", err)
+	}
+	defer func() { _ = filteredConn.Close() }()
+	drainMessages(t, filteredConn, 1)
+
+	waitForMetricsBody(t, func(body string) bool {
+		return strings.Contains(body, `btick_ws_symbol_subscribers{symbol="BTC/USD"} 1`) &&
+			strings.Contains(body, `btick_ws_symbol_subscribers{symbol="ETH/USD"} 2`)
+	})
+
+	unsubMsg, _ := json.Marshal(clientAction{
+		Action:  "unsubscribe",
+		Symbols: []string{"BTC/USD"},
+	})
+	mustWriteMessage(t, allConn, websocket.TextMessage, unsubMsg)
+
+	waitForMetricsBody(t, func(body string) bool {
+		return !strings.Contains(body, `btick_ws_symbol_subscribers{symbol="BTC/USD"}`) &&
+			strings.Contains(body, `btick_ws_symbol_subscribers{symbol="ETH/USD"} 2`)
+	})
+
+	_ = filteredConn.Close()
+	waitForMetricsBody(t, func(body string) bool {
+		return !strings.Contains(body, `btick_ws_symbol_subscribers{symbol="BTC/USD"}`) &&
+			strings.Contains(body, `btick_ws_symbol_subscribers{symbol="ETH/USD"} 1`)
+	})
 }
 
 func TestWSHub_InitialState_NilGetState(t *testing.T) {
@@ -773,6 +963,67 @@ func TestServer_NextBroadcastBatch_CoalescesBurst(t *testing.T) {
 	}
 	if msg := byType["source_price"]; msg.Price != "84275" {
 		t.Fatalf("unexpected source_price batch entry: %#v", msg)
+	}
+}
+
+func TestServer_NextBroadcastMessage_SkipsClosedChannels(t *testing.T) {
+	eng := newMockEngine(nil)
+	s := testServer(nil, eng)
+
+	close(eng.snapshotCh)
+	_, nextSnapshotCh, nextTickCh, nextSourcePriceCh, ok := s.nextBroadcastMessage(
+		context.Background(),
+		eng.snapshotCh,
+		eng.tickCh,
+		eng.sourcePriceCh,
+		false,
+	)
+	if ok {
+		t.Fatal("expected no message while only draining a closed channel")
+	}
+	if nextSnapshotCh != nil {
+		t.Fatal("expected closed snapshot channel to be nilled")
+	}
+	if nextTickCh == nil {
+		t.Fatal("expected tick channel to remain active")
+	}
+	if nextSourcePriceCh == nil {
+		t.Fatal("expected source price channel to remain active")
+	}
+
+	eng.tickCh <- domain.CanonicalTick{
+		CanonicalSymbol: "BTC/USD",
+		CanonicalPrice:  decimal.NewFromInt(84_200),
+		TSEvent:         time.Date(2026, 3, 19, 9, 10, 0, 0, time.UTC),
+	}
+
+	msg, nextSnapshotCh, nextTickCh, nextSourcePriceCh, ok := s.nextBroadcastMessage(
+		context.Background(),
+		nextSnapshotCh,
+		nextTickCh,
+		nextSourcePriceCh,
+		true,
+	)
+	if !ok {
+		t.Fatal("expected message from remaining open channels")
+	}
+	if msg.Type != "latest_price" {
+		t.Fatalf("expected latest_price, got %q", msg.Type)
+	}
+	if msg.Price != "84200" {
+		t.Fatalf("expected latest tick price, got %q", msg.Price)
+	}
+	if nextSnapshotCh != nil {
+		t.Fatal("expected closed snapshot channel to be nilled")
+	}
+	if nextTickCh == nil {
+		t.Fatal("expected tick channel to remain active")
+	}
+	if nextSourcePriceCh == nil {
+		t.Fatal("expected source price channel to remain active")
+	}
+	if len(eng.tickCh) != 0 {
+		t.Fatal("expected tick message to be consumed")
 	}
 }
 
