@@ -71,6 +71,11 @@ type SnapshotEngine struct {
 	// Buffered channel for canonical tick DB writes
 	ticksToWrite     chan domain.CanonicalTick
 	snapshotsToWrite chan domain.Snapshot1s
+
+	// Source price broadcast (throttled per source)
+	sourcePriceCh    chan domain.SourcePriceEvent
+	sourceThrottleMu sync.Mutex
+	sourceLastEmit   map[string]time.Time // per-source last emit time
 }
 
 type venueState struct {
@@ -112,6 +117,8 @@ func NewSnapshotEngine(
 		finalizeSem:      make(chan struct{}, 10), // max 10 concurrent finalizations
 		ticksToWrite:     make(chan domain.CanonicalTick, 500),
 		snapshotsToWrite: make(chan domain.Snapshot1s, 32),
+		sourcePriceCh:    make(chan domain.SourcePriceEvent, 100),
+		sourceLastEmit:   make(map[string]time.Time),
 	}
 }
 
@@ -120,6 +127,9 @@ func (e *SnapshotEngine) SnapshotCh() <-chan domain.Snapshot1s { return e.snapsh
 
 // TickCh returns the channel for canonical ticks.
 func (e *SnapshotEngine) TickCh() <-chan domain.CanonicalTick { return e.tickCh }
+
+// SourcePriceCh returns the channel for throttled per-source price updates.
+func (e *SnapshotEngine) SourcePriceCh() <-chan domain.SourcePriceEvent { return e.sourcePriceCh }
 
 // LatestState returns the current latest state for the API.
 func (e *SnapshotEngine) LatestState() *domain.LatestState {
@@ -240,6 +250,8 @@ func (e *SnapshotEngine) updateVenueState(evt domain.RawEvent) {
 		}
 		// Emit canonical tick on each trade event
 		e.emitTick(evt)
+		// Emit throttled source price update
+		e.emitSourcePrice(evt)
 
 	case "ticker":
 		vs.lastQuote = &quoteInfo{
@@ -250,6 +262,33 @@ func (e *SnapshotEngine) updateVenueState(evt domain.RawEvent) {
 	}
 
 	e.recordPipelineLatency(evt)
+}
+
+const sourceThrottleInterval = 500 * time.Millisecond
+
+func (e *SnapshotEngine) emitSourcePrice(evt domain.RawEvent) {
+	e.sourceThrottleMu.Lock()
+	last, ok := e.sourceLastEmit[evt.Source]
+	now := time.Now()
+	if ok && now.Sub(last) < sourceThrottleInterval {
+		e.sourceThrottleMu.Unlock()
+		return
+	}
+	e.sourceLastEmit[evt.Source] = now
+	e.sourceThrottleMu.Unlock()
+
+	sp := domain.SourcePriceEvent{
+		Symbol: e.canonicalSymbol,
+		Source: evt.Source,
+		Price:  evt.Price,
+		TS:     evt.ExchangeTS,
+	}
+
+	select {
+	case e.sourcePriceCh <- sp:
+	default:
+		// drop if channel full — non-blocking
+	}
 }
 
 func (e *SnapshotEngine) emitTick(evt domain.RawEvent) {
