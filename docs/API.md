@@ -23,8 +23,107 @@ btick is a real-time Bitcoin price oracle service that aggregates prices from mu
 ## Transport
 
 - **Content-Type:** REST responses are `application/json`; `GET /metrics` is Prometheus text format
-- **CORS:** `Access-Control-Allow-Origin: *` — all origins permitted, `GET` and `OPTIONS` methods allowed
+- **CORS:** `Access-Control-Allow-Origin: *` — all origins permitted, `GET`, `POST`, and `OPTIONS` methods allowed
 - **Machine-readable spec:** See `openapi.yaml` for the full OpenAPI 3.0 schema
+
+## Access Tiers
+
+When `access.enabled` is turned on, btick enforces API-key tiers:
+
+| Route | Access |
+|-------|--------|
+| `GET /v1/health`, `GET /v1/health/feeds`, `GET /v1/price/latest`, `GET /v1/symbols`, `GET /v1/metadata`, `GET /metrics` | Public |
+| `POST /v1/auth/signup` | Public when `access.signup_enabled=true` |
+| `GET /v1/auth/me` | Any valid API key |
+| `GET /v1/price/snapshots`, `GET /v1/price/ticks`, `GET /v1/price/settlement`, `WS /ws/price` | `starter` |
+| `GET /v1/price/raw` | `pro` |
+
+API keys can be sent as `X-API-Key`, `Authorization: Bearer <key>`, or `api_key` on the WebSocket query string.
+
+### POST /v1/auth/signup
+
+Creates a new account and returns a generated API key.
+
+**Request:**
+
+```json
+{
+  "email": "operator@example.com",
+  "name": "Ops Team"
+}
+```
+
+**Response (201):**
+
+```json
+{
+  "account_id": "9cb07885-2444-42d2-9e64-a2d82cf68d7d",
+  "email": "operator@example.com",
+  "name": "Ops Team",
+  "tier": "starter",
+  "api_key": "btk_...",
+  "api_key_prefix": "btk_12345678",
+  "created_at": "2026-04-13T10:15:00.000000000Z"
+}
+```
+
+**Errors:**
+- `400` invalid JSON or missing email
+- `409` account already exists
+- `503` database unavailable
+
+If signup is disabled, the route is not registered and returns `404`.
+
+### GET /v1/auth/me
+
+Returns the currently authenticated account bound to the supplied API key.
+
+**Headers:**
+- `X-API-Key: btk_...`
+- or `Authorization: Bearer btk_...`
+
+**Response (200):**
+
+```json
+{
+  "account_id": "9cb07885-2444-42d2-9e64-a2d82cf68d7d",
+  "email": "operator@example.com",
+  "name": "Ops Team",
+  "tier": "starter",
+  "api_key_prefix": "btk_12345678",
+  "active": true,
+  "created_at": "2026-04-13T10:15:00.000000000Z",
+  "last_used_at": "2026-04-13T10:16:04.000000000Z"
+}
+```
+
+**Errors:**
+- `401` missing or invalid API key
+- `503` database unavailable
+
+### GET /v1/metadata
+
+Returns presentation and product metadata for a canonical symbol. This is intended for UI trust surfaces, exchange cards, and integration portals.
+
+**Parameters:**
+- `symbol` optional canonical symbol such as `BTC/USD`; defaults to the first configured symbol
+
+**Response (200):**
+
+```json
+{
+  "symbol": "BTC/USD",
+  "base_asset": "BTC",
+  "quote_asset": "USD",
+  "product_type": "price",
+  "product_sub_type": "reference",
+  "product_name": "BTC/USD-RefPrice-DS-Premium-Global-003",
+  "market_hours": "24/7",
+  "feed_id": "btick-refprice-btc-usd"
+}
+```
+
+If the symbol is unknown, the endpoint returns `404`.
 
 ---
 
@@ -45,6 +144,22 @@ Prometheus-compatible process metrics for drops, latencies, writer flushes, and 
 # TYPE btick_writer_flush_duration_seconds histogram
 # HELP btick_ws_clients Currently connected WebSocket clients.
 # TYPE btick_ws_clients gauge
+# HELP btick_ws_fanout_total Total WebSocket client deliveries by message type.
+# TYPE btick_ws_fanout_total counter
+# HELP btick_ws_type_drops_total Total dropped WebSocket messages by message type.
+# TYPE btick_ws_type_drops_total counter
+# HELP btick_ws_type_evictions_total Total WebSocket client evictions triggered by message type.
+# TYPE btick_ws_type_evictions_total counter
+# HELP btick_ws_symbol_fanout_total Total WebSocket client deliveries by message type and symbol.
+# TYPE btick_ws_symbol_fanout_total counter
+# HELP btick_ws_symbol_drops_total Total dropped WebSocket messages by message type and symbol.
+# TYPE btick_ws_symbol_drops_total counter
+# HELP btick_ws_symbol_evictions_total Total WebSocket client evictions triggered by message type and symbol.
+# TYPE btick_ws_symbol_evictions_total counter
+# HELP btick_ws_symbol_subscribers Currently connected WebSocket clients subscribed to each symbol.
+# TYPE btick_ws_symbol_subscribers gauge
+# HELP btick_ws_coalesced_total Total WebSocket updates superseded by burst coalescing before broadcast.
+# TYPE btick_ws_coalesced_total counter
 ```
 
 ---
@@ -59,6 +174,11 @@ System health check with latest price status.
 {
   "status": "ok",
   "timestamp": "2026-03-19T09:10:00.123456789Z",
+  "dependencies": {
+    "database": {
+      "ready": true
+    }
+  },
   "latest_price": "70105.45",
   "latest_ts": "2026-03-19T09:09:59.876543Z",
   "source_count": 3
@@ -74,6 +194,8 @@ System health check with latest price status.
 | `no_data` | No price data available yet |
 
 > Note: `latest_price`, `latest_ts`, and `source_count` are omitted when status is `no_data`.
+
+> `dependencies.database.ready` reports whether persistence-backed features are initialized. During cold starts the API can return `200` while database readiness is still `false`.
 
 ---
 
@@ -405,6 +527,14 @@ ws://localhost:8080/ws/price
 wss://btick-production.up.railway.app/ws/price
 ```
 
+Optional connect-time symbol filtering is available via the `symbols` query parameter. The filter is applied before initial-state messages are sent, so clients only receive the requested symbols from the first handshake onward.
+
+```text
+wss://btick-production.up.railway.app/ws/price?symbols=ETH%2FUSD,SOL%2FUSD
+```
+
+Multiple symbols can be passed as a comma-separated list. Unknown symbols are ignored. If none of the requested symbols currently have state, the server sends `no_data_yet`.
+
 ### Connection Lifecycle
 
 On connect, the server sends two messages before any live broadcast data:
@@ -508,17 +638,24 @@ All broadcast messages (including heartbeats) share a single monotonically incre
 - Received `seq: 10` then `seq: 13` → missed 2 messages
 - Action: call `GET /v1/price/latest` to resync current state
 
-With subscription filtering, clients subscribed to a subset of message types will naturally see `seq` gaps — this is expected and not an indication of dropped messages.
+With subscription filtering, clients subscribed to a subset of message types or symbols will naturally see `seq` gaps — this is expected and not an indication of dropped messages.
 
 ---
 
 ### Subscription Filtering (Client → Server)
 
-Clients can subscribe/unsubscribe from specific message types. By default, all types are subscribed (backward-compatible — a client that sends nothing receives everything).
+Clients can subscribe/unsubscribe from specific message types and symbols. By default, all message types and all symbols are subscribed (backward-compatible — a client that sends nothing receives everything).
+
+For clients that already know their symbol set at connect time, prefer the `symbols` query parameter on the WebSocket URL so unwanted initial-state messages are never sent.
 
 **Subscribe:**
 ```json
 {"action": "subscribe", "types": ["snapshot_1s", "latest_price", "heartbeat"]}
+```
+
+**Subscribe only selected symbols:**
+```json
+{"action": "subscribe", "types": ["snapshot_1s", "latest_price"], "symbols": ["ETH/USD"]}
 ```
 
 **Unsubscribe:**
@@ -526,9 +663,16 @@ Clients can subscribe/unsubscribe from specific message types. By default, all t
 {"action": "unsubscribe", "types": ["snapshot_1s"]}
 ```
 
+**Unsubscribe a symbol while leaving all others enabled:**
+```json
+{"action": "unsubscribe", "symbols": ["BTC/USD"]}
+```
+
 **Available types:** `snapshot_1s`, `latest_price`, `heartbeat`
 
-Unknown actions and types are silently ignored (forward-compatible).
+**Symbols field:** optional. Omit it to keep all symbols enabled.
+
+Unknown actions, types, and symbols are silently ignored (forward-compatible).
 
 **Example — chart client that only needs snapshots:**
 ```json
@@ -547,6 +691,7 @@ Unknown actions and types are silently ignored (forward-compatible).
 | Read deadline (pong timeout) | 60s | `server.ws.read_deadline_sec` |
 
 - **Drop handling:** If a client's send buffer fills (slow consumer), messages are dropped silently rather than blocking other clients. Drops are logged server-side every 100 occurrences.
+- **Burst handling:** During high-frequency bursts, the server coalesces queued updates by message type and symbol/source before fan-out so clients receive the freshest state without the API loop falling behind.
 - **Reconnection:** Client should implement exponential backoff. On reconnect, the client receives a fresh welcome + initial state.
 
 ---

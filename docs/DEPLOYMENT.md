@@ -99,6 +99,9 @@ railway variables set DATABASE_URL="postgresql://..."
 
 # Optional: Set PORT for Railway
 railway variables set PORT=8080
+
+# Optional: keep production logs at info; set debug only while troubleshooting
+railway variables set LOG_LEVEL=info
 ```
 
 ### 4. Deploy
@@ -477,6 +480,9 @@ health:
    | source_count | < 3 for 5m | < 2 for 5m |
    | Health status | degraded | stale or no_data |
    | API latency | > 100ms | > 500ms |
+
+4. **WebSocket Operations:**
+  - For a Grafana panel layout, PromQL examples, and WebSocket-specific drop/eviction thresholds, see `docs/WEBSOCKET_OPERATIONS.md`
 
 ---
 

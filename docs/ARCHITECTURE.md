@@ -390,7 +390,7 @@ Reconnect Attempt
 ### Network
 - All exchange connections use TLS (wss://)
 - API supports CORS for browser clients
-- No authentication required for public price data
+- Public health/latest routes can stay open; optional API-key tiers can gate WebSocket, historical, and raw endpoints
 
 ### Secrets Management
 - Database credentials via `DATABASE_URL` env var

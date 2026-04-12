@@ -19,6 +19,10 @@ tags:
     description: Price data endpoints
   - name: Health
     description: System health endpoints
+  - name: Auth
+    description: API account endpoints
+  - name: Metadata
+    description: Symbol metadata endpoints
 
 paths:
   /v1/price/latest:
@@ -162,7 +166,7 @@ paths:
           description: Filter by source
           schema:
             type: string
-              enum: [binance, coinbase, kraken, okx]
+            enum: [binance, coinbase, kraken, okx]
         - name: start
           in: query
           required: false
@@ -219,8 +223,203 @@ paths:
                 items:
                   $ref: '#/components/schemas/FeedHealth'
 
+  /v1/auth/signup:
+    post:
+      tags: [Auth]
+      summary: Create an API account
+      description: Creates a new API account and returns a generated API key when signup is enabled.
+      operationId: signupAPIAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/APIAccount'
+                  - type: object
+                    required: [api_key]
+                    properties:
+                      api_key:
+                        type: string
+                        description: Generated API key. Returned only at signup time.
+                        example: btk_0123456789abcdef
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Account already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Database unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current API account
+      description: Returns the account associated with the supplied API key.
+      operationId: getCurrentAPIAccount
+      security:
+        - ApiKeyHeader: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIAccount'
+        '401':
+          description: Missing or invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Database unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/symbols:
+    get:
+      tags: [Health]
+      summary: List configured symbols
+      description: Returns the list of canonical symbols configured on this instance
+      operationId: getSymbols
+      responses:
+        '200':
+          description: List of canonical symbols
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                example: ["BTC/USD", "ETH/USD"]
+
+  /v1/metadata:
+    get:
+      tags: [Metadata]
+      summary: Get symbol metadata
+      description: Returns UI and product metadata for a canonical symbol.
+      operationId: getSymbolMetadata
+      parameters:
+        - name: symbol
+          in: query
+          required: false
+          description: Canonical symbol such as BTC/USD. Defaults to the first configured symbol.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Symbol metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SymbolMetadata'
+        '404':
+          description: Symbol not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
 components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
   schemas:
+    SignupRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          example: operator@example.com
+        name:
+          type: string
+          example: Ops Team
+
+    APIAccount:
+      type: object
+      required: [account_id, email, tier, api_key_prefix, active, created_at]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        tier:
+          type: string
+          example: starter
+        api_key_prefix:
+          type: string
+          example: btk_12345678
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+
+    SymbolMetadata:
+      type: object
+      required: [symbol, base_asset, quote_asset, product_type, product_sub_type, product_name, market_hours, feed_id]
+      properties:
+        symbol:
+          type: string
+          example: BTC/USD
+        base_asset:
+          type: string
+          example: BTC
+        quote_asset:
+          type: string
+          example: USD
+        product_type:
+          type: string
+          example: price
+        product_sub_type:
+          type: string
+          example: reference
+        product_name:
+          type: string
+          example: BTC/USD-RefPrice-DS-Premium-Global-003
+        market_hours:
+          type: string
+          example: 24/7
+        feed_id:
+          type: string
+          example: btick-refprice-btc-usd
+
     LatestPrice:
       type: object
       required: [symbol, ts, price, basis, source_count]
@@ -394,6 +593,14 @@ components:
         timestamp:
           type: string
           format: date-time
+        dependencies:
+          type: object
+          properties:
+            database:
+              type: object
+              properties:
+                ready:
+                  type: boolean
         latest_price:
           type: string
         latest_ts:
@@ -489,16 +696,23 @@ components:
       type: object
       description: |
         Client-to-server message for subscription management.
-        Unknown actions and types are silently ignored (forward-compatible).
-      required: [action, types]
+        Unknown actions, types, and symbols are silently ignored (forward-compatible).
+      required: [action]
       properties:
         action:
           type: string
           enum: [subscribe, unsubscribe]
-          description: Subscribe or unsubscribe from message types
+          description: Subscribe or unsubscribe from message types and symbols
         types:
           type: array
           items:
             type: string
             enum: [snapshot_1s, latest_price, heartbeat]
           description: Message types to subscribe/unsubscribe
+        symbols:
+          type: array
+          items:
+            type: string
+          description: |
+            Optional canonical symbols to subscribe/unsubscribe.
+            Omit to keep all symbols enabled.
