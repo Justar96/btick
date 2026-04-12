@@ -1,0 +1,144 @@
+.sidebar {
+  width: 172px;
+  border-right: 1px solid var(--border);
+  padding: 32px 0;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  position: sticky;
+  top: 0;
+}
+
+.logo {
+  padding: 0 20px;
+  margin-bottom: 28px;
+}
+
+.logo a {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.5px;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  padding: 0 10px;
+  gap: 1px;
+}
+
+.navLink {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.navLink:hover {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.navLinkActive {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.navIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 7px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--text-ghost);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  letter-spacing: -0.5px;
+  flex-shrink: 0;
+}
+
+.coinIcon {
+  flex-shrink: 0;
+}
+
+.divider {
+  height: 1px;
+  background: var(--border-light);
+  margin: 8px 10px;
+}
+
+.sectionLinks {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0 0 22px;
+  gap: 0;
+}
+
+.sectionLink {
+  display: block;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-decoration: none;
+  padding: 3px 10px;
+  border-left: 1px solid var(--border-light);
+}
+
+.sectionLink:hover {
+  color: var(--text);
+  border-left-color: var(--text-muted);
+}
+
+.sectionLinkActive {
+  color: var(--text);
+  border-left-color: var(--text);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+  .sidebar {
+    width: 100%;
+    height: auto;
+    position: static;
+    flex-direction: row;
+    align-items: center;
+    padding: 12px 16px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    gap: 4px;
+    overflow-x: auto;
+  }
+
+  .logo {
+    padding: 0;
+    margin-bottom: 0;
+    margin-right: 12px;
+    flex-shrink: 0;
+  }
+
+  .nav {
+    flex-direction: row;
+    padding: 0;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .divider,
+  .spacer,
+  .sectionLinks {
+    display: none;
+  }
+}

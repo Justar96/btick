@@ -1,0 +1,77 @@
+.wrap {
+  margin: 0 -48px 32px;
+}
+
+.chart {
+  height: 320px;
+}
+
+/* Price range bar below chart */
+.range {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin: 12px 48px 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.rangeStat {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 12px;
+  border-right: 1px solid var(--border-light);
+}
+
+.rangeStat:last-child {
+  border-right: none;
+}
+
+.rangeStat:first-child {
+  padding-left: 0;
+}
+
+.rangeLabel {
+  font-size: 10px;
+  color: var(--text-ghost);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.rangeValue {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+.rangeUp {
+  color: var(--green);
+}
+
+.rangeDown {
+  color: var(--red);
+}
+
+.rangePct {
+  color: inherit;
+  opacity: 0.6;
+}
+
+@media (max-width: 768px) {
+  .wrap {
+    margin: 0 -20px 24px;
+  }
+
+  .range {
+    margin: 0 20px;
+    flex-wrap: wrap;
+    gap: 4px 0;
+  }
+
+  .rangeStat {
+    padding: 2px 8px;
+  }
+}

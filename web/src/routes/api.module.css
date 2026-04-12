@@ -1,0 +1,314 @@
+.page {
+  max-width: 660px;
+  margin: 0 auto;
+  padding: 0 48px 64px;
+}
+
+/* Header */
+.header {
+  padding-top: 56px;
+  margin-bottom: 40px;
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.5px;
+  margin-bottom: 6px;
+}
+
+.desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+
+.baseUrl {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  padding: 8px 12px;
+  border-radius: 6px;
+  display: block;
+}
+
+.transport {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 10px;
+}
+
+/* Endpoint sections */
+.section {
+  padding: 32px 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.endpoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.method {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.methodGet {
+  color: var(--green);
+  background: #f0fdf4;
+}
+
+.methodWs {
+  color: #6366f1;
+  background: #eef2ff;
+}
+
+.path {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.sectionDesc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+
+/* Parameters */
+.params {
+  margin-bottom: 14px;
+}
+
+.paramsLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.param {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.param:last-child {
+  border-bottom: none;
+}
+
+.paramName {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.paramRequired {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--red);
+  flex-shrink: 0;
+}
+
+.paramOptional {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.paramDesc {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Code blocks */
+.codeBlock {
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: #333;
+  line-height: 1.7;
+  overflow-x: auto;
+  margin-bottom: 14px;
+  white-space: pre;
+}
+
+.codeComment {
+  color: var(--text-faint);
+}
+
+/* Status / error tables */
+.statusTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+
+.statusTable th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 5px 12px 5px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.statusTable td {
+  padding: 5px 12px 5px 0;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-secondary);
+}
+
+.statusTable td:first-child {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.errors {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.8;
+}
+
+.errorCode {
+  font-family: var(--mono);
+  color: var(--text-secondary);
+}
+
+/* WS message types table */
+.msgTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+
+.msgTable th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 5px 12px 5px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.msgTable td {
+  padding: 5px 12px 5px 0;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-secondary);
+}
+
+.msgTable td:first-child {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.msgTable td:nth-child(2) {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* Sub-endpoint heading within a section */
+.subEndpoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 24px;
+  margin-bottom: 8px;
+}
+
+/* Section subtitle */
+.sectionSubtitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+/* All Endpoints summary table */
+.summaryTable {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.summaryRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.summaryRow:last-child {
+  border-bottom: none;
+}
+
+.summaryMethod {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  min-width: 30px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.summaryPath {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+}
+
+.summaryDesc {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+@media (max-width: 768px) {
+  .page {
+    padding: 0 20px 40px;
+  }
+
+  .header {
+    padding-top: 32px;
+  }
+
+  .codeBlock {
+    font-size: 11px;
+    padding: 12px;
+  }
+
+  .summaryDesc {
+    display: none;
+  }
+
+  .param {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+}

@@ -1,0 +1,131 @@
+.wrap {
+  margin-bottom: 32px;
+}
+
+.heading {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Row transitions */
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-radius: 6px;
+  transition:
+    opacity 0.4s ease,
+    transform 0.3s ease,
+    background-color 0.2s ease;
+}
+
+.rowVisible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.rowStale {
+  opacity: 0.35;
+  transform: translateY(0);
+}
+
+/* Name column */
+.nameCol {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  color: white;
+  flex-shrink: 0;
+  letter-spacing: 0.3px;
+}
+
+.nameGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.name {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.ago {
+  font-size: 10px;
+  color: var(--text-ghost);
+  line-height: 1.2;
+}
+
+/* Price column */
+.priceCol {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.price {
+  font-size: 13px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  transition: color 0.3s ease;
+}
+
+.flashUp {
+  color: var(--green);
+}
+
+.flashDown {
+  color: var(--red);
+}
+
+.delta {
+  font-size: 11px;
+  color: var(--text-ghost);
+  min-width: 52px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.3s ease;
+}
+
+.deltaUp {
+  color: var(--green);
+}
+
+.deltaDown {
+  color: var(--red);
+}
+
+.empty {
+  font-size: 13px;
+  color: var(--text-ghost);
+  padding: 10px 0;
+}
+
+@media (max-width: 768px) {
+  .ago {
+    display: none;
+  }
+}

@@ -1,0 +1,65 @@
+.wrap {
+  margin-bottom: 32px;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.price {
+  font-size: 38px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -1.5px;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.3s;
+}
+
+.up {
+  color: var(--green);
+}
+
+.down {
+  color: var(--red);
+}
+
+.currency {
+  font-size: 13px;
+  color: var(--text-ghost);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.ago {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.sep {
+  font-size: 11px;
+  color: var(--border);
+}
+
+.basis {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.stale {
+  font-size: 11px;
+  color: var(--red);
+  font-weight: 500;
+}
+
+.degraded {
+  font-size: 11px;
+  color: var(--yellow);
+  font-weight: 500;
+}
