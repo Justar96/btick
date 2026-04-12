@@ -471,10 +471,12 @@ func TestBaseAdapter_OnConnectedCallback(t *testing.T) {
 // =============================================================================
 
 func TestBaseAdapter_InvalidURL(t *testing.T) {
+	// Use a local address that refuses connections immediately, rather than a
+	// non-existent DNS name which may hang for 10+ seconds on some systems.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	ba := NewBaseAdapter("test", "wss://invalid.nonexistent.domain:9999", 5*time.Second, 0, logger)
+	ba := NewBaseAdapter("test", "wss://127.0.0.1:1", 5*time.Second, 0, logger)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -483,12 +485,17 @@ func TestBaseAdapter_InvalidURL(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait a bit
-	time.Sleep(500 * time.Millisecond)
-
-	// Should have errors
-	if ba.ConsecutiveErrors() == 0 {
-		t.Error("should have consecutive errors for invalid URL")
+	// Poll — connection refused is fast but backoff adds a small delay.
+	deadline := time.After(3 * time.Second)
+	for {
+		if ba.ConsecutiveErrors() > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for consecutive errors from invalid URL")
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 
 	cancel()
