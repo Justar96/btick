@@ -28,14 +28,19 @@ type WSMessage struct {
 	SourceCount  int      `json:"source_count,omitempty"`
 	SourcesUsed  []string `json:"sources_used,omitempty"`
 	Message      string   `json:"message,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	ConnState    string   `json:"conn_state,omitempty"`
+	Stale        bool     `json:"stale,omitempty"`
 }
 
 // subscriptions tracks which message types a client wants.
 type subscriptions struct {
-	mu          sync.RWMutex
-	snapshot1s  bool
-	latestPrice bool
-	heartbeat   bool
+	mu           sync.RWMutex
+	snapshot1s   bool
+	latestPrice  bool
+	heartbeat    bool
+	sourcePrice  bool
+	sourceStatus bool
 }
 
 func newSubscriptions() *subscriptions {
@@ -56,6 +61,10 @@ func (s *subscriptions) wants(msgType string) bool {
 		return s.latestPrice
 	case "heartbeat":
 		return s.heartbeat
+	case "source_price":
+		return s.sourcePrice
+	case "source_status":
+		return s.sourceStatus
 	default:
 		return true // welcome, unknown types always pass
 	}
@@ -71,6 +80,10 @@ func (s *subscriptions) set(msgType string, val bool) {
 		s.latestPrice = val
 	case "heartbeat":
 		s.heartbeat = val
+	case "source_price":
+		s.sourcePrice = val
+	case "source_status":
+		s.sourceStatus = val
 	}
 }
 
