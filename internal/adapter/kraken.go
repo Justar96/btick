@@ -15,9 +15,10 @@ import (
 // KrakenAdapter handles Kraken WebSocket v2 trade and ticker channels.
 type KrakenAdapter struct {
 	*BaseAdapter
-	outCh        chan<- domain.RawEvent
-	nativeSymbol string
-	useTicker    bool
+	outCh           chan<- domain.RawEvent
+	nativeSymbol    string
+	useTicker       bool
+	canonicalSymbol string
 }
 
 // krakenMsg is the top-level Kraken WS v2 message.
@@ -49,12 +50,13 @@ type krakenTicker struct {
 	Last   float64 `json:"last"`
 }
 
-func NewKrakenAdapter(url, nativeSymbol string, useTicker bool, pingInterval time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *KrakenAdapter {
+func NewKrakenAdapter(url, nativeSymbol, canonicalSymbol string, useTicker bool, pingInterval time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *KrakenAdapter {
 	ka := &KrakenAdapter{
-		BaseAdapter:  NewBaseAdapter("kraken", url, pingInterval, 0, logger),
-		outCh:        outCh,
-		nativeSymbol: nativeSymbol,
-		useTicker:    useTicker,
+		BaseAdapter:     NewBaseAdapter("kraken", url, pingInterval, 0, logger),
+		outCh:           outCh,
+		nativeSymbol:    nativeSymbol,
+		useTicker:       useTicker,
+		canonicalSymbol: canonicalSymbol,
 	}
 	ka.SetMessageHandler(ka.handleMessage)
 	ka.SetOnConnected(ka.subscribe)
@@ -148,7 +150,7 @@ func (ka *KrakenAdapter) handleTrades(rawData json.RawMessage, fullPayload []byt
 		evt := domain.RawEvent{
 			Source:          "kraken",
 			SymbolNative:    t.Symbol,
-			SymbolCanonical: "BTC/USD",
+			SymbolCanonical: ka.canonicalSymbol,
 			EventType:       "trade",
 			ExchangeTS:      exchangeTS,
 			RecvTS:          recvTS,
@@ -185,7 +187,7 @@ func (ka *KrakenAdapter) handleTicker(rawData json.RawMessage, fullPayload []byt
 		evt := domain.RawEvent{
 			Source:          "kraken",
 			SymbolNative:    tk.Symbol,
-			SymbolCanonical: "BTC/USD",
+			SymbolCanonical: ka.canonicalSymbol,
 			EventType:       "ticker",
 			ExchangeTS:      recvTS,
 			RecvTS:          recvTS,

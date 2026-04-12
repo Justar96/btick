@@ -14,8 +14,9 @@ import (
 // OKXAdapter handles OKX public WebSocket trades and tickers channels.
 type OKXAdapter struct {
 	*BaseAdapter
-	outCh        chan<- domain.RawEvent
-	nativeSymbol string
+	outCh           chan<- domain.RawEvent
+	nativeSymbol    string
+	canonicalSymbol string
 }
 
 type okxArg struct {
@@ -47,11 +48,12 @@ type okxTicker struct {
 	TS     string `json:"ts"`
 }
 
-func NewOKXAdapter(url, nativeSymbol string, pingInterval time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *OKXAdapter {
+func NewOKXAdapter(url, nativeSymbol, canonicalSymbol string, pingInterval time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *OKXAdapter {
 	oa := &OKXAdapter{
-		BaseAdapter:  NewBaseAdapter("okx", url, pingInterval, 0, logger),
-		outCh:        outCh,
-		nativeSymbol: nativeSymbol,
+		BaseAdapter:     NewBaseAdapter("okx", url, pingInterval, 0, logger),
+		outCh:           outCh,
+		nativeSymbol:    nativeSymbol,
+		canonicalSymbol: canonicalSymbol,
 	}
 	oa.SetMessageHandler(oa.handleMessage)
 	oa.SetOnConnected(oa.subscribe)
@@ -127,7 +129,7 @@ func (oa *OKXAdapter) handleTrades(rawData json.RawMessage, fullPayload []byte, 
 		evt := domain.RawEvent{
 			Source:          "okx",
 			SymbolNative:    trade.InstID,
-			SymbolCanonical: "BTC/USD",
+			SymbolCanonical: oa.canonicalSymbol,
 			EventType:       "trade",
 			ExchangeTS:      exchangeTS,
 			RecvTS:          recvTS,
@@ -177,7 +179,7 @@ func (oa *OKXAdapter) handleTickers(rawData json.RawMessage, fullPayload []byte,
 		evt := domain.RawEvent{
 			Source:          "okx",
 			SymbolNative:    ticker.InstID,
-			SymbolCanonical: "BTC/USD",
+			SymbolCanonical: oa.canonicalSymbol,
 			EventType:       "ticker",
 			ExchangeTS:      exchangeTS,
 			RecvTS:          recvTS,

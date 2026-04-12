@@ -15,8 +15,9 @@ import (
 // BinanceAdapter handles Binance btcusdt@trade and btcusdt@bookTicker streams.
 type BinanceAdapter struct {
 	*BaseAdapter
-	outCh  chan<- domain.RawEvent
-	symbol string
+	outCh           chan<- domain.RawEvent
+	symbol          string
+	canonicalSymbol string
 }
 
 // binanceTrade represents a Binance trade stream message.
@@ -47,11 +48,12 @@ type binanceCombinedMsg struct {
 	Data   json.RawMessage `json:"data"`
 }
 
-func NewBinanceAdapter(url, nativeSymbol string, pingInterval, maxLifetime time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *BinanceAdapter {
+func NewBinanceAdapter(url, nativeSymbol, canonicalSymbol string, pingInterval, maxLifetime time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *BinanceAdapter {
 	ba := &BinanceAdapter{
-		BaseAdapter: NewBaseAdapter("binance", url, pingInterval, maxLifetime, logger),
-		outCh:       outCh,
-		symbol:      nativeSymbol,
+		BaseAdapter:     NewBaseAdapter("binance", url, pingInterval, maxLifetime, logger),
+		outCh:           outCh,
+		symbol:          nativeSymbol,
+		canonicalSymbol: canonicalSymbol,
 	}
 	ba.SetMessageHandler(ba.handleMessage)
 	// Binance combined streams don't require a subscribe message;
@@ -103,7 +105,7 @@ func (ba *BinanceAdapter) handleTrade(rawData json.RawMessage, fullPayload []byt
 	evt := domain.RawEvent{
 		Source:          "binance",
 		SymbolNative:    t.Symbol,
-		SymbolCanonical: "BTC/USD",
+		SymbolCanonical: ba.canonicalSymbol,
 		EventType:       "trade",
 		ExchangeTS:      time.UnixMilli(t.TradeTime),
 		RecvTS:          recvTS,
@@ -134,7 +136,7 @@ func (ba *BinanceAdapter) handleBookTicker(rawData json.RawMessage, fullPayload 
 	evt := domain.RawEvent{
 		Source:          "binance",
 		SymbolNative:    bt.Symbol,
-		SymbolCanonical: "BTC/USD",
+		SymbolCanonical: ba.canonicalSymbol,
 		EventType:       "ticker",
 		ExchangeTS:      recvTS, // bookTicker has no exchange timestamp
 		RecvTS:          recvTS,

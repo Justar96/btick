@@ -31,6 +31,7 @@ func TestBinanceAdapter_HandleTrade(t *testing.T) {
 	ba := NewBinanceAdapter(
 		"wss://test.binance.com",
 		"btcusdt",
+		"BTC/USD",
 		30*time.Second,
 		0,
 		outCh,
@@ -83,7 +84,7 @@ func TestBinanceAdapter_HandleTrade(t *testing.T) {
 
 func TestBinanceAdapter_HandleTrade_SellSide(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ba := NewBinanceAdapter("wss://test", "btcusdt", 30*time.Second, 0, outCh, testLogger())
+	ba := NewBinanceAdapter("wss://test", "btcusdt", "BTC/USD", 30*time.Second, 0, outCh, testLogger())
 
 	tradeMsg := binanceCombinedMsg{
 		Stream: "btcusdt@trade",
@@ -113,7 +114,7 @@ func TestBinanceAdapter_HandleTrade_SellSide(t *testing.T) {
 
 func TestBinanceAdapter_HandleBookTicker(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ba := NewBinanceAdapter("wss://test", "btcusdt", 30*time.Second, 0, outCh, testLogger())
+	ba := NewBinanceAdapter("wss://test", "btcusdt", "BTC/USD", 30*time.Second, 0, outCh, testLogger())
 
 	tickerMsg := binanceCombinedMsg{
 		Stream: "btcusdt@bookTicker",
@@ -147,7 +148,7 @@ func TestBinanceAdapter_HandleBookTicker(t *testing.T) {
 
 func TestBinanceAdapter_InvalidJSON(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ba := NewBinanceAdapter("wss://test", "btcusdt", 30*time.Second, 0, outCh, testLogger())
+	ba := NewBinanceAdapter("wss://test", "btcusdt", "BTC/USD", 30*time.Second, 0, outCh, testLogger())
 
 	ba.handleMessage(1, []byte("invalid json"), time.Now())
 
@@ -161,7 +162,7 @@ func TestBinanceAdapter_InvalidJSON(t *testing.T) {
 
 func TestBinanceAdapter_InvalidPrice(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ba := NewBinanceAdapter("wss://test", "btcusdt", 30*time.Second, 0, outCh, testLogger())
+	ba := NewBinanceAdapter("wss://test", "btcusdt", "BTC/USD", 30*time.Second, 0, outCh, testLogger())
 
 	tradeMsg := binanceCombinedMsg{
 		Stream: "btcusdt@trade",
@@ -252,7 +253,7 @@ func TestCoinbaseAdapter_Subscribe(t *testing.T) {
 	}
 	defer conn.Close()
 
-	ca := NewCoinbaseAdapter("wss://test.coinbase.com", "BTC-USD", 30*time.Second, nil, testLogger())
+	ca := NewCoinbaseAdapter("wss://test.coinbase.com", "BTC-USD", "BTC/USD", 30*time.Second, nil, testLogger())
 	if err := ca.subscribe(conn); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
@@ -297,6 +298,7 @@ func TestCoinbaseAdapter_HandleMatch(t *testing.T) {
 	ca := NewCoinbaseAdapter(
 		"wss://test.coinbase.com",
 		"BTC-USD",
+		"BTC/USD",
 		30*time.Second,
 		outCh,
 		testLogger(),
@@ -338,7 +340,7 @@ func TestCoinbaseAdapter_HandleMatch(t *testing.T) {
 
 func TestCoinbaseAdapter_HandleTicker(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", 30*time.Second, outCh, testLogger())
+	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", "BTC/USD", 30*time.Second, outCh, testLogger())
 
 	msg := coinbaseMsg{
 		Type:      "ticker",
@@ -369,7 +371,7 @@ func TestCoinbaseAdapter_HandleTicker(t *testing.T) {
 
 func TestCoinbaseAdapter_SkipsOtherProducts(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", 30*time.Second, outCh, testLogger())
+	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", "BTC/USD", 30*time.Second, outCh, testLogger())
 
 	msg := coinbaseMsg{
 		Type:      "ticker",
@@ -390,7 +392,7 @@ func TestCoinbaseAdapter_SkipsOtherProducts(t *testing.T) {
 
 func TestCoinbaseAdapter_HandleLastMatch(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", 30*time.Second, outCh, testLogger())
+	ca := NewCoinbaseAdapter("wss://test", "BTC-USD", "BTC/USD", 30*time.Second, outCh, testLogger())
 
 	msg := coinbaseMsg{
 		Type:      "last_match",
@@ -445,7 +447,7 @@ func TestOKXAdapter_Subscribe(t *testing.T) {
 	}
 	defer conn.Close()
 
-	oa := NewOKXAdapter("wss://ws.okx.com:8443/ws/v5/public", "BTC-USDT", 20*time.Second, nil, testLogger())
+	oa := NewOKXAdapter("wss://ws.okx.com:8443/ws/v5/public", "BTC-USDT", "BTC/USD", 20*time.Second, nil, testLogger())
 	if err := oa.subscribe(conn); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
@@ -489,7 +491,7 @@ func TestOKXAdapter_Subscribe(t *testing.T) {
 
 func TestOKXAdapter_HandleTrade(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", "BTC/USD", 20*time.Second, outCh, testLogger())
 
 	payload := []byte(`{
 		"arg": {"channel": "trades", "instId": "BTC-USDT"},
@@ -525,7 +527,7 @@ func TestOKXAdapter_HandleTrade(t *testing.T) {
 
 func TestOKXAdapter_IgnoresSubscribeAck(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", "BTC/USD", 20*time.Second, outCh, testLogger())
 
 	payload := []byte(`{
 		"event": "subscribe",
@@ -543,7 +545,7 @@ func TestOKXAdapter_IgnoresSubscribeAck(t *testing.T) {
 
 func TestOKXAdapter_HandleTicker(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", "BTC/USD", 20*time.Second, outCh, testLogger())
 
 	payload := []byte(`{
 		"arg": {"channel": "tickers", "instId": "BTC-USDT"},
@@ -574,7 +576,7 @@ func TestOKXAdapter_HandleTicker(t *testing.T) {
 
 func TestOKXAdapter_SkipsOtherInstruments(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	oa := NewOKXAdapter("wss://test", "BTC-USDT", 20*time.Second, outCh, testLogger())
+	oa := NewOKXAdapter("wss://test", "BTC-USDT", "BTC/USD", 20*time.Second, outCh, testLogger())
 
 	payload := []byte(`{
 		"arg": {"channel": "tickers", "instId": "ETH-USDT"},
@@ -603,6 +605,7 @@ func TestKrakenAdapter_HandleTrade(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
 	ka := NewKrakenAdapter(
 		"wss://test.kraken.com",
+		"BTC/USD",
 		"BTC/USD",
 		true,
 		30*time.Second,
@@ -653,7 +656,7 @@ func TestKrakenAdapter_HandleTrade(t *testing.T) {
 
 func TestKrakenAdapter_HandleTicker(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ka := NewKrakenAdapter("wss://test", "BTC/USD", true, 30*time.Second, outCh, testLogger())
+	ka := NewKrakenAdapter("wss://test", "BTC/USD", "BTC/USD", true, 30*time.Second, outCh, testLogger())
 
 	msg := krakenMsg{
 		Channel: "ticker",
@@ -688,7 +691,7 @@ func TestKrakenAdapter_HandleTicker(t *testing.T) {
 
 func TestKrakenAdapter_SkipsOtherSymbols(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ka := NewKrakenAdapter("wss://test", "BTC/USD", true, 30*time.Second, outCh, testLogger())
+	ka := NewKrakenAdapter("wss://test", "BTC/USD", "BTC/USD", true, 30*time.Second, outCh, testLogger())
 
 	msg := krakenMsg{
 		Channel: "ticker",
@@ -712,7 +715,7 @@ func TestKrakenAdapter_SkipsOtherSymbols(t *testing.T) {
 
 func TestKrakenAdapter_Snapshot(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 10)
-	ka := NewKrakenAdapter("wss://test", "BTC/USD", false, 30*time.Second, outCh, testLogger())
+	ka := NewKrakenAdapter("wss://test", "BTC/USD", "BTC/USD", false, 30*time.Second, outCh, testLogger())
 
 	// Snapshot should only emit the last (most recent) trade
 	msg := krakenMsg{
@@ -750,7 +753,7 @@ func TestKrakenAdapter_Snapshot(t *testing.T) {
 func TestAdapter_ChannelFullDoesNotBlock(t *testing.T) {
 	// Channel with capacity 1
 	outCh := make(chan domain.RawEvent, 1)
-	ba := NewBinanceAdapter("wss://test", "btcusdt", 30*time.Second, 0, outCh, testLogger())
+	ba := NewBinanceAdapter("wss://test", "btcusdt", "BTC/USD", 30*time.Second, 0, outCh, testLogger())
 
 	tradeMsg := binanceCombinedMsg{
 		Stream: "btcusdt@trade",
@@ -786,7 +789,7 @@ func TestAdapter_ChannelFullDoesNotBlock(t *testing.T) {
 
 func TestAdapter_ConcurrentMessages(t *testing.T) {
 	outCh := make(chan domain.RawEvent, 1000)
-	ba := NewBinanceAdapter("wss://test", "btcusdt", 30*time.Second, 0, outCh, testLogger())
+	ba := NewBinanceAdapter("wss://test", "btcusdt", "BTC/USD", 30*time.Second, 0, outCh, testLogger())
 
 	var wg sync.WaitGroup
 	numGoroutines := 10

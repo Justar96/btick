@@ -16,8 +16,9 @@ import (
 // CoinbaseAdapter handles Coinbase Exchange public ws-feed matches and ticker channels.
 type CoinbaseAdapter struct {
 	*BaseAdapter
-	outCh        chan<- domain.RawEvent
-	nativeSymbol string
+	outCh           chan<- domain.RawEvent
+	nativeSymbol    string
+	canonicalSymbol string
 }
 
 // coinbaseMsg is the top-level Coinbase Exchange ws-feed message.
@@ -34,11 +35,12 @@ type coinbaseMsg struct {
 	Message   string `json:"message"`
 }
 
-func NewCoinbaseAdapter(url, nativeSymbol string, pingInterval time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *CoinbaseAdapter {
+func NewCoinbaseAdapter(url, nativeSymbol, canonicalSymbol string, pingInterval time.Duration, outCh chan<- domain.RawEvent, logger *slog.Logger) *CoinbaseAdapter {
 	ca := &CoinbaseAdapter{
-		BaseAdapter:  NewBaseAdapter("coinbase", url, pingInterval, 0, logger),
-		outCh:        outCh,
-		nativeSymbol: nativeSymbol,
+		BaseAdapter:     NewBaseAdapter("coinbase", url, pingInterval, 0, logger),
+		outCh:           outCh,
+		nativeSymbol:    nativeSymbol,
+		canonicalSymbol: canonicalSymbol,
 	}
 	ca.SetMessageHandler(ca.handleMessage)
 	ca.SetOnConnected(ca.subscribe)
@@ -100,7 +102,7 @@ func (ca *CoinbaseAdapter) emitTrade(msg coinbaseMsg, fullPayload []byte, recvTS
 	evt := domain.RawEvent{
 		Source:          "coinbase",
 		SymbolNative:    msg.ProductID,
-		SymbolCanonical: "BTC/USD",
+		SymbolCanonical: ca.canonicalSymbol,
 		EventType:       "trade",
 		ExchangeTS:      exchangeTS,
 		RecvTS:          recvTS,
@@ -142,7 +144,7 @@ func (ca *CoinbaseAdapter) emitTicker(msg coinbaseMsg, fullPayload []byte, recvT
 	evt := domain.RawEvent{
 		Source:          "coinbase",
 		SymbolNative:    msg.ProductID,
-		SymbolCanonical: "BTC/USD",
+		SymbolCanonical: ca.canonicalSymbol,
 		EventType:       "ticker",
 		ExchangeTS:      exchangeTS,
 		RecvTS:          recvTS,
